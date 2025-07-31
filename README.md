@@ -28,8 +28,8 @@ EquiNet/
 ├── out/                 # 训练输出的模型权重
 ├── src/
 │   ├── train.py         # 主训练脚本
-│   ├── train_mark.py    # 使用积分制评估模型的训练脚本
-│   ├── test_best_model.py # 模型评估脚本
+│   ├── test_model.py    # 模型评估脚本
+│   ├── config.py        # 统一配置文件
 │   └── ...              # 其他源码
 ├── README.md
 └── ...
@@ -38,6 +38,7 @@ EquiNet/
 ## 数据格式说明
 
 - 数据目录：`./data`
+- 价格区间：1 ~ 6 元
 - 每个`.xlsx`文件对应一只股票，包含420天数据，共319只股票。
 - 字段说明（共9列）：
   - `time`：日期（如`2023/06/27`）
@@ -101,164 +102,225 @@ pip install torch pandas numpy tqdm
      python src/test_best_model.py
      ```
 
-### 模型输出
-   - 输出为对未来3天的概率预测：
-     - 上涨3%及以上的概率
-     - 下跌2%及以下的概率
-     - 保持在-2%~3%区间的概率
-   - 示例输出：
-     ```
-     涨：21%
-     跌：54%
-     稳：25%
-     ```
+## 配置文件使用说明
 
-## 实验结果
+<details>
+<summary><strong>📋 点击展开：配置文件详细使用说明</strong></summary>
 
-- 详见`src/test-result.CSV`。
-- 主要指标为不同参数下的训练集、测试集、全集准确率，便于横向对比模型表现。
-- 为了更好地评估模型的实际能力，最新版本提供积分制评估模型的训练脚本`src/train_mark.py`。
+### 概述
 
-## 常见问题 FAQ
+`config.py` 是 EquiNet 项目的统一配置文件，用于管理模型参数、训练参数和评估参数。通过这个配置文件，您可以轻松地调整模型的各种设置，而无需修改多个文件。
 
-- **Q: 数据文件格式有要求吗？**
-  - A: 需为Excel `.xlsx` 格式，字段顺序与上述一致，且每只股票提供地数据量要大于60天。
-- **Q: 如何调整模型大小？**
-  - A: 直接修改`src/trainXXX.py`中的`d_model`参数即可.
-- **Q: 支持多GPU吗？**
-  - A: 当前版本默认单GPU，可自行扩展`DataParallel`等方式。
-- **Q: 训练慢怎么办？**
-  - A: 建议使用CUDA GPU，或减少模型参数/训练轮数。
-- **Q: 模型的参数如何选择？**
-  - A: 目前正在尝试不同参数组合，具体的测试数据也会放在`src/test-result.xlsx`中。
+### 配置文件结构
 
-## 当前方向
+配置文件包含以下几个主要部分：
 
-目标是增强其对股票上涨的敏感度，如果股票大概率下跌，那他就不准出现预测上涨，最多也只准预测为“平稳”，但是又担心这会抑制其预测上涨的能力，对于极高可能出现上涨的股票，应当预测上涨而非下跌......
+#### 1. 模型架构参数 (ModelConfig)
+- **基础模型参数**: 输入维度、模型维度、注意力头数、层数等
+- **位置编码参数**: 时间衰减因子
+- **注意力机制参数**: Dropout比率
+- **专业化注意力头分配**: 价格、成交量、波动率、模式头数量
+- **多尺度注意力参数**: 短期、中期、长期窗口设置
 
-即既要提升对上涨的敏感度又要避免误判下跌为上涨，可以采用以下分阶段解决方案：
+#### 2. 训练参数 (TrainingConfig)
+- **基础训练参数**: 训练轮数、学习率、批处理大小
+- **优化器参数**: 权重衰减、梯度裁剪
+- **学习率调度器参数**: 步长、衰减因子
+- **损失函数参数**: Focal Loss的alpha和gamma参数
+- **动态权重调整参数**: 窗口大小、权重范围
 
-### 一、类别重构与损失函数改进
-1. **正负样本数量极不平衡问题**：
-   ```笔记
-   Focal Loss损失函数介绍：Focal Loss的引入主要是为了解决one-stage目标检测中正负样本数量极不平衡问题。
-   比如：在一张图像中能够匹配到目标的候选框（正样本）个数一般只有十几个或几十个，而没有匹配到的候选框
-   （负样本）则有10000~100000个。这么多的负样本不仅对训练网络起不到什么作用，反而会淹没掉少量但有助于训练的样本。
-   对于股票来说，样本不平衡问题是常态。
-   ```
+#### 3. 数据参数 (DataConfig)
+- **数据路径**: 数据目录、输出目录
+- **数据分割参数**: 测试集比例、随机种子
+- **样本生成参数**: 历史数据长度、预测天数
+- **类别阈值**: 大涨、大跌阈值
+- **评估参数**: 评估样本数量
 
-2. **引入代价矩阵**：
-    目标：解决训练目标与评估目标不一致的问题
-    加权交叉熵：给"下跌→上涨"这种错误分配更高的权重，但这种方法不如自定义损失函数精确
+#### 4. 评估参数 (EvaluationConfig)
+- **评分规则**: 正确预测得分、错误预测扣分
+- **评估设置**: 评估样本数、批处理大小
 
+#### 5. 设备配置 (DeviceConfig)
+- **设备管理**: 自动检测GPU/CPU
+- **设备信息**: 打印设备信息
 
-    ```python
-    # 定义代价矩阵
-    cost_matrix = torch.tensor([[0, 1, 1, 1],  # 上涨
-                                [1, 0, 1, 1],  # 下跌
-                                [1, 1, 0, 1],  # 平稳
-                                [1, 1, 1, 0]]) # 强下跌
-    # 计算代价
-    cost = cost_matrix[targets, predictions]
-    ```
-    - 或者设计损失函数
-    核心思路：让训练损失函数直接反映你的评分规则，这样模型在训练过程中就知道"哪些错误更致命"。
-    具体做法是替换标准的CrossEntropyLoss，设计一个非对称惩罚损失函数：
-    python# 伪代码示意
-    class AsymmetricPenaltyLoss:
-        def forward(self, predictions, targets):
-            if prediction == target:
-                loss = 0  # 正确预测无损失
-            elif target == 上涨 and prediction == 下跌:
-                loss = 1.0  # 轻度惩罚
-            elif target == 下跌 and prediction == 上涨:
-                loss = 2.0  # 重度惩罚（这种错误在投资中损失最大）
-            else:
-                loss = 0.5  # 震荡预测错误，中等惩罚
-    
+#### 6. 模型保存配置 (ModelSaveConfig)
+- **模型文件名**: 最佳模型、最终模型文件名
+- **路径管理**: 获取模型保存路径
 
+### 使用方法
 
-
-### 二、置信度门控机制
-1. **动态分类阈值**：
-```python
-def dynamic_threshold_predict(output, threshold_dict=None):
-      if threshold_dict is None:
-         threshold_dict = {'up': 0.6, 'down': 0.7}  # 默认阈值
-      probs = F.softmax(output, dim=1)
-      result = torch.zeros_like(probs[:,0], dtype=torch.long)
-      # 上涨条件：上涨概率超过阈值且高于下跌概率2倍
-      up_mask = (probs[:,0] > threshold_dict['up']) & (probs[:,0] > probs[:,1]*2)
-      # 下跌条件：下跌概率超过阈值且高于上涨概率3倍
-      down_mask = (probs[:,1] > threshold_dict['down']) & (probs[:,1] > probs[:,0]*3)
-      result[up_mask] = 0  # 上涨
-      result[down_mask] = 1  # 下跌
-      # 其余情况标记为平稳
-      return result
+#### 1. 查看当前配置
+```bash
+python src/config.py
 ```
 
-### 三、多任务学习框架
-```python
-class EnhancedStockTransformer(nn.Module):
-    def __init__(self, input_dim, d_model, nhead, num_layers, output_dim):
-        super().__init__()
-        self.embedding = nn.Linear(input_dim, d_model)
-        self.transformer = ...  # 主干网络
-        # 主任务：趋势预测
-        self.trend_head = nn.Sequential(...)
-        # 辅助任务1：波动率预测
-        self.volatility_head = nn.Sequential(...)
-        # 辅助任务2：动量强度预测
-        self.momentum_head = nn.Sequential(...)
+#### 2. 修改配置参数
+直接编辑 `src/config.py` 文件中的相应参数值。例如：
 
-    def forward(self, x):
-        features = self.transformer(self.embedding(x))
-        trend = self.trend_head(features)
-        volatility = self.volatility_head(features)
-        momentum = self.momentum_head(features)
-        return trend, volatility, momentum
+```python
+# 修改训练参数
+TrainingConfig.EPOCHS = 100                    # 增加训练轮数
+TrainingConfig.LEARNING_RATE = 0.0005          # 降低学习率
+
+# 修改模型参数
+ModelConfig.D_MODEL = 256                       # 增加模型维度
+ModelConfig.NHEAD = 16                          # 增加注意力头数
+
+# 修改数据参数
+DataConfig.CONTEXT_LENGTH = 90                  # 增加历史数据长度
+DataConfig.UPRISE_THRESHOLD = 0.05              # 调整大涨阈值
 ```
 
-### 四、验证指标优化
+#### 3. 查看配置摘要
+```bash
+python src/config.py
+```
+系统会打印当前配置摘要。
+
+#### 4. 运行训练
+```bash
+python src/train.py
+```
+训练脚本会自动使用配置文件中的参数。
+
+#### 5. 测试模型
+```bash
+python src/test_model.py
+```
+测试脚本也会使用配置文件中的参数。
+
+### 常用参数调整
+
+#### 提高模型性能
 ```python
-# 新增关键指标监控：
-def calculate_metrics(outputs, targets):
-    metrics = {}
-    # 上涨召回率：预测为上涨的样本中实际上涨的比例
-    metrics['up_recall'] = true_positive_up / (actual_up + 1e-8)  
-    # 下跌误判率：实际下跌但预测为上涨的比例
-    metrics['down_misjudge'] = down_to_up / (actual_down + 1e-8)
-    # 极端上涨捕获率：top 5%涨幅样本的预测准确率
-    metrics['extreme_up_capture'] = extreme_up_correct / (extreme_up_total + 1e-8)
-    return metrics
+# 增加模型复杂度
+ModelConfig.D_MODEL = 256
+ModelConfig.NHEAD = 16
+ModelConfig.NUM_LAYERS = 6
+
+# 调整训练参数
+TrainingConfig.EPOCHS = 100
+TrainingConfig.LEARNING_RATE = 0.0005
+TrainingConfig.BATCH_SIZE = 32
 ```
 
-### 五、dropout层策略防止过拟合
+#### 加快训练速度
 ```python
-self.embedding = nn.Sequential(
-    nn.Linear(input_dim, d_model),
-    nn.Dropout(0.3)
-)
+# 减少模型复杂度
+ModelConfig.D_MODEL = 64
+ModelConfig.NHEAD = 4
+ModelConfig.NUM_LAYERS = 2
+
+# 调整训练参数
+TrainingConfig.BATCH_SIZE = 100
+TrainingConfig.BATCHES_PER_EPOCH = 10
 ```
 
+#### 处理类别不平衡
+```python
+# 调整Focal Loss参数
+TrainingConfig.FOCAL_LOSS_ALPHA = [2.0, 2.5, 1.0]
+TrainingConfig.FOCAL_LOSS_GAMMA = 2.5
 
+# 调整类别阈值
+DataConfig.UPRISE_THRESHOLD = 0.05
+DataConfig.DOWNFALL_THRESHOLD = -0.03
+```
 
-### 关键平衡点控制：
-1. **阈值校准器**：
-   ```python
-   # 根据市场波动率动态调整阈值：
-   dynamic_threshold = base_threshold * (1 + market_volatility_factor)
-   ```
+#### 调整评估策略
+```python
+# 修改评分规则
+EvaluationConfig.CORRECT_PREDICTION_SCORE = 2
+EvaluationConfig.UPRISE_PREDICTED_DOWNFALL = -2
+EvaluationConfig.DOWNFALL_PREDICTED_UPRISE = -3
 
+# 增加评估样本
+EvaluationConfig.EVAL_SAMPLES = 2000
+```
 
+### 参数修改示例
 
-3. **置信度衰减函数**：
-   ```python
-   # 对长期横盘股票降低上涨预测置信度：
-   confidence_decay = 1 / (1 + days_since_last_breakout)
-   ```
+以下是一些常见的参数修改示例：
 
-这种方法体系既保持了模型对真实上涨机会的识别能力，又通过多层过滤机制防止在下跌行情中的误判。建议采用A/B测试框架，逐步验证每个改进模块的效果。  
+#### 提高模型性能
+```python
+# 增加模型复杂度
+ModelConfig.D_MODEL = 256
+ModelConfig.NHEAD = 16
+ModelConfig.NUM_LAYERS = 6
+
+# 调整训练参数
+TrainingConfig.EPOCHS = 100
+TrainingConfig.LEARNING_RATE = 0.0005
+TrainingConfig.BATCH_SIZE = 32
+```
+
+#### 加快训练速度
+```python
+# 减少模型复杂度
+ModelConfig.D_MODEL = 64
+ModelConfig.NHEAD = 4
+ModelConfig.NUM_LAYERS = 2
+
+# 调整训练参数
+TrainingConfig.BATCH_SIZE = 100
+TrainingConfig.BATCHES_PER_EPOCH = 10
+```
+
+#### 处理类别不平衡
+```python
+# 调整Focal Loss参数
+TrainingConfig.FOCAL_LOSS_ALPHA = [2.0, 2.5, 1.0]
+TrainingConfig.FOCAL_LOSS_GAMMA = 2.5
+
+# 调整类别阈值
+DataConfig.UPRISE_THRESHOLD = 0.05
+DataConfig.DOWNFALL_THRESHOLD = -0.03
+```
+
+#### 调整评估策略
+```python
+# 修改评分规则
+EvaluationConfig.CORRECT_PREDICTION_SCORE = 2
+EvaluationConfig.UPRISE_PREDICTED_DOWNFALL = -2
+EvaluationConfig.DOWNFALL_PREDICTED_UPRISE = -3
+
+# 增加评估样本
+EvaluationConfig.EVAL_SAMPLES = 2000
+```
+
+### 注意事项
+
+1. **参数一致性**: 确保训练和测试时使用相同的配置参数
+2. **内存限制**: 增加模型维度时注意GPU内存限制
+3. **训练时间**: 增加训练轮数或模型复杂度会显著增加训练时间
+4. **数据质量**: 调整类别阈值可能影响数据质量和模型性能
+
+### 故障排除
+
+#### 常见问题
+
+1. **参数设置错误**: 检查参数设置是否合理，特别是模型维度与注意力头数的关系
+2. **内存不足**: 减少批处理大小或模型维度
+3. **训练速度慢**: 增加批处理大小或减少模型复杂度
+4. **模型性能差**: 调整学习率、增加训练轮数或模型复杂度
+
+#### 调试建议
+
+1. 先使用默认配置运行，确保系统正常工作
+2. 逐步调整参数，观察对性能的影响
+3. 使用 `config.py` 查看配置摘要
+4. 记录不同配置下的性能表现
+
+### 版本历史
+
+- **v1.0**: 初始版本，包含基本的模型、训练、数据和评估参数
+- **v1.1**: 添加了参数验证和配置摘要功能
+- **v1.2**: 增加了设备配置和模型保存配置
+- **v1.3**: 添加了使用示例和详细文档
+
+</details>
 
 ## 项目修改LOG
 

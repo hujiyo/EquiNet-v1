@@ -23,6 +23,9 @@ from tqdm import tqdm
 import random
 import math
 import torch.nn.functional as F
+from config import (ModelConfig, TrainingConfig, DataConfig, 
+                   EvaluationConfig, DeviceConfig, ModelSaveConfig,
+                   print_config_summary)
 
 # Focal Loss实现
 class FocalLoss(nn.Module):
@@ -76,7 +79,7 @@ class DynamicClassWeightAdjuster:
     """
     动态调整类别权重，根据训练过程中的类别分布实时调整
     """
-    def __init__(self, num_classes=3, window_size=1000):
+    def __init__(self, num_classes=3, window_size=TrainingConfig.DYNAMIC_WEIGHT_WINDOW_SIZE):
         self.num_classes = num_classes
         self.window_size = window_size
         self.class_counts = np.zeros(num_classes)
@@ -107,81 +110,66 @@ class DynamicClassWeightAdjuster:
         weights = weights / np.mean(weights)
         
         # 限制权重范围，避免过度不平衡
-        weights = np.clip(weights, 0.5, 3.0)
+        weights = np.clip(weights, TrainingConfig.DYNAMIC_WEIGHT_MIN, TrainingConfig.DYNAMIC_WEIGHT_MAX)
         
         return weights.tolist()
 
 # 时间感知的位置编码类
 class TimeAwarePositionalEncoding(nn.Module):
-    """
-    时间感知的位置编码，有两个作用：
-    1. 让模型知道每个数据点在时间序列中的位置（第1天、第2天...第60天）
-    2. 给近期数据分配更高的权重，因为近期数据对未来预测更重要
-    """
-    def __init__(self, d_model, max_seq_len=100, decay_factor=0.1):
+    def __init__(self, d_model, max_seq_len=ModelConfig.MAX_SEQ_LEN, decay_factor=ModelConfig.POSITIONAL_ENCODING_DECAY):
         super(TimeAwarePositionalEncoding, self).__init__()
         
-        # 创建标准的正弦余弦位置编码，让模型理解序列顺序
         pe = torch.zeros(max_seq_len, d_model)
         position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
         
-        # 使用不同频率的正弦余弦函数，让每个位置都有独特的编码
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)  # 偶数维度用sin
-        pe[:, 1::2] = torch.cos(position * div_term)  # 奇数维度用cos
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
         
-        # 添加时间衰减权重：距离当前时间越近，权重越大
-        # 比如第60天(最新)权重为1.0，第59天权重为0.9，第58天为0.81...
         time_weights = torch.exp(-decay_factor * torch.arange(max_seq_len - 1, -1, -1, dtype=torch.float))
-        pe = pe * time_weights.unsqueeze(1)  # 将时间权重应用到位置编码上
+        pe = pe * time_weights.unsqueeze(1)
         
-        self.register_buffer('pe', pe)  # 注册为buffer，不参与梯度更新但会保存到模型中
+        self.register_buffer('pe', pe)
+        
+        # 添加层归一化用于残差连接
+        self.norm = nn.LayerNorm(d_model)
         
     def forward(self, x):
-        # x的shape: [batch_size, seq_len, d_model]
+        # 使用残差连接：输出 = LayerNorm(输入 + 位置编码)
         seq_len = x.size(1)
-        # 将对应长度的位置编码加到输入上
-        return x + self.pe[:seq_len, :].unsqueeze(0)
+        pe_slice = self.pe[:seq_len, :].unsqueeze(0)
+        return self.norm(x + pe_slice)
 
 # 专业化的多头注意力机制
 class SpecializedMultiHeadAttention(nn.Module):
-    """
-    专业化的多头注意力，不同的头关注不同类型的市场信息：
-    - 价格趋势头：主要看开盘、收盘价的变化趋势
-    - 成交量头：分析量价关系，成交量的变化模式  
-    - 波动头：关注价格波动率，最高最低价的变化
-    - 综合头：学习其他复杂的组合模式
-    """
     def __init__(self, d_model, nhead):
         super(SpecializedMultiHeadAttention, self).__init__()
         self.d_model = d_model
         self.nhead = nhead
         self.head_dim = d_model // nhead
         
-        # 确保d_model能被nhead整除
         assert d_model % nhead == 0
         
-        # 为不同类型的头分配数量
-        self.price_heads = max(1, nhead // 4)      # 价格趋势头
-        self.volume_heads = max(1, nhead // 4)     # 成交量分析头  
-        self.volatility_heads = max(1, nhead // 4) # 波动率分析头
-        self.pattern_heads = nhead - self.price_heads - self.volume_heads - self.volatility_heads  # 综合模式头
+        self.price_heads = max(1, nhead // 4)
+        self.volume_heads = max(1, nhead // 4)
+        self.volatility_heads = max(1, nhead // 4)
+        self.pattern_heads = nhead - self.price_heads - self.volume_heads - self.volatility_heads
         
-        # 为每种类型的头创建独立的注意力机制
         self.price_attention = nn.MultiheadAttention(d_model, self.price_heads, batch_first=True)
         self.volume_attention = nn.MultiheadAttention(d_model, self.volume_heads, batch_first=True) 
         self.volatility_attention = nn.MultiheadAttention(d_model, self.volatility_heads, batch_first=True)
         self.pattern_attention = nn.MultiheadAttention(d_model, self.pattern_heads, batch_first=True)
         
-        # 用于融合不同类型注意力输出的权重，让模型学会如何组合这些信息
-        self.fusion_weights = nn.Parameter(torch.ones(4) / 4)  # 初始化为平均权重
+        self.fusion_weights = nn.Parameter(torch.ones(4) / 4)
+        
+        # 添加层归一化和残差连接支持
         self.fusion_norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(ModelConfig.DROPOUT_RATE)
         
     def forward(self, x, attn_mask=None):
-        # x的shape: [batch_size, seq_len, d_model]
-        # attn_mask: [seq_len, seq_len] or None
-
-        # 处理mask：nn.MultiheadAttention 需要float mask，且要在同一设备
+        # 保存输入用于残差连接
+        residual = x
+        
         mask = None
         if attn_mask is not None:
             mask = attn_mask.to(dtype=x.dtype, device=x.device)
@@ -196,7 +184,10 @@ class SpecializedMultiHeadAttention(nn.Module):
                         weights[1] * volume_out +
                         weights[2] * volatility_out +
                         weights[3] * pattern_out)
-        return self.fusion_norm(fused_output)
+        
+        # 添加残差连接：输出 = LayerNorm(输入 + Dropout(注意力输出))
+        output = self.fusion_norm(residual + self.dropout(fused_output))
+        return output
 
 # 多尺度注意力层
 class MultiScaleAttentionLayer(nn.Module):
@@ -218,14 +209,14 @@ class MultiScaleAttentionLayer(nn.Module):
         self.feed_forward = nn.Sequential(
             nn.Linear(d_model, d_model * 4),  # 先扩展维度
             nn.ReLU(),                        # 激活函数
-            nn.Dropout(0.1),                  # 防过拟合
+            nn.Dropout(ModelConfig.DROPOUT_RATE),  # 防过拟合
             nn.Linear(d_model * 4, d_model),  # 再压缩回原维度
         )
         
         # 层归一化，帮助训练稳定
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model) 
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(ModelConfig.DROPOUT_RATE)
         
         # 多尺度融合的权重
         self.scale_weights = nn.Parameter(torch.ones(3) / 3)
@@ -245,15 +236,15 @@ class MultiScaleAttentionLayer(nn.Module):
             mask[-window:, -window:] = 1
         elif scale_type == 'medium':
             # 中期：关注最近30天的数据
-            window = min(30, seq_len)  
+            window = min(30, seq_len)
             mask[-window:, -window:] = 1
         else:  # long term
             # 长期：可以看全部数据，但距离越远权重越小
             for i in range(seq_len):
                 for j in range(seq_len):
-                    # 距离越远，权重越小（时间衰减）
-                    distance = abs(i - j)
-                    mask[i, j] = math.exp(-0.1 * distance)
+                            # 距离越远，权重越小（时间衰减）
+        distance = abs(i - j)
+        mask[i, j] = math.exp(-ModelConfig.LONG_TERM_DECAY * distance)
                     
         return mask
         
@@ -288,58 +279,50 @@ class MultiScaleAttentionLayer(nn.Module):
 
 # 增强版的Transformer模型
 class EnhancedStockTransformer(nn.Module):
-    """
-    增强版的股票预测Transformer模型，主要改进：
-    1. 加入了时间感知的位置编码
-    2. 使用专业化的多头注意力机制
-    3. 采用多尺度注意力层
-    4. 增加了更好的正则化机制
-    """
-    def __init__(self, input_dim, d_model, nhead, num_layers, output_dim, max_seq_len=100):
+    def __init__(self, input_dim, d_model, nhead, num_layers, output_dim, max_seq_len, decay_factor):
         super(EnhancedStockTransformer, self).__init__()
         
-        # 输入特征嵌入层：将8维输入特征映射到d_model维度
         self.embedding = nn.Linear(input_dim, d_model)
+        # 添加嵌入层的归一化
+        self.embedding_norm = nn.LayerNorm(d_model)
         
-        # 时间感知的位置编码
-        self.pos_encoding = TimeAwarePositionalEncoding(d_model, max_seq_len)
+        self.pos_encoding = TimeAwarePositionalEncoding(d_model, max_seq_len, decay_factor)
         
-        # 多个多尺度注意力层堆叠
         self.layers = nn.ModuleList([
             MultiScaleAttentionLayer(d_model, nhead) 
             for _ in range(num_layers)
         ])
         
-        # 输出层：从d_model维度映射到3个类别（上涨/下跌/震荡）
+        # 在输出前添加最终的层归一化
+        self.final_norm = nn.LayerNorm(d_model)
+        
         self.output_projection = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),  # 先降维
-            nn.ReLU(),                         # 激活
-            nn.Dropout(0.2),                   # 防过拟合
-            nn.Linear(d_model // 2, output_dim) # 最终输出
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Dropout(ModelConfig.DROPOUT_RATE * 2),  # 输出层使用更大的dropout
+            nn.Linear(d_model // 2, output_dim)
         )
         
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(ModelConfig.DROPOUT_RATE)
         
     def forward(self, x):
-        # x的shape: [batch_size, seq_len, input_dim]
+        # 1. 特征嵌入 + 残差连接风格的归一化
+        x = self.embedding_norm(self.embedding(x))
         
-        # 1. 特征嵌入：将原始特征映射到更高维度的表示空间
-        x = self.embedding(x)  # [batch_size, seq_len, d_model]
-        
-        # 2. 加入位置编码：让模型知道时间顺序和远近关系
+        # 2. 位置编码（内部已有残差连接）
         x = self.pos_encoding(x)
         x = self.dropout(x)
         
-        # 3. 通过多个多尺度注意力层进行特征学习
+        # 3. Transformer层（每层内部都有残差连接）
         for layer in self.layers:
             x = layer(x)
         
-        # 4. 取最后一个时间步的输出用于预测（因为我们要预测未来）
-        # x[:, -1, :] 表示取每个样本的最后一个时间步
-        last_hidden = x[:, -1, :]  # [batch_size, d_model]
+        # 4. 最终归一化
+        x = self.final_norm(x)
         
-        # 5. 输出层：得到3个类别的logits（注意：这里不使用softmax，让损失函数来处理）
-        output = self.output_projection(last_hidden)  # [batch_size, output_dim]
+        # 5. 取最后时间步 + 输出投影
+        last_hidden = x[:, -1, :]
+        output = self.output_projection(last_hidden)
         
         return output
 
@@ -353,8 +336,8 @@ def generate_single_sample(all_data):
     for _ in range(100):  # 最多尝试100次生成有效样本
         stock_index = np.random.randint(0, len(all_data))
         stock_data = all_data[stock_index]
-        context_length = 60  # 使用60天历史数据
-        required_length = context_length + 3  # 需要额外3天来计算未来收益
+        context_length = DataConfig.CONTEXT_LENGTH  # 使用配置的历史数据长度
+        required_length = DataConfig.REQUIRED_LENGTH  # 需要额外3天来计算未来收益
         
         if len(stock_data) < required_length:
             continue
@@ -373,9 +356,9 @@ def generate_single_sample(all_data):
         cumulative_return = (end_price - start_price) / start_price
         
         # 根据收益率确定类别标签
-        if cumulative_return >= 0.03:      # 涨幅≥3%：大涨
+        if cumulative_return >= DataConfig.UPRISE_THRESHOLD:      # 涨幅≥3%：大涨
             target = 0
-        elif cumulative_return <= -0.02:   # 跌幅≥2%：大跌  
+        elif cumulative_return <= DataConfig.DOWNFALL_THRESHOLD:   # 跌幅≥2%：大跌  
             target = 1
         else:                              # 其他情况：震荡
             target = 2
@@ -411,7 +394,7 @@ def generate_batch_samples(all_data, batch_size):
     
     return np.array(batch_inputs), np.array(batch_targets)
 
-def create_evaluation_dataset(test_data, num_samples=1000):
+def create_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPLES):
     eval_inputs = []
     eval_targets = []
     
@@ -423,7 +406,7 @@ def create_evaluation_dataset(test_data, num_samples=1000):
     return np.array(eval_inputs), np.array(eval_targets)
 
 # 数据预处理函数
-def load_and_preprocess_data(data_dir, test_ratio=0.1, seed=42):
+def load_and_preprocess_data(data_dir=DataConfig.DATA_DIR, test_ratio=DataConfig.TEST_RATIO, seed=DataConfig.RANDOM_SEED):
     """
     改进的数据加载和预处理函数
     确保训练集和测试集完全独立，没有数据泄露
@@ -463,7 +446,7 @@ def load_and_preprocess_data(data_dir, test_ratio=0.1, seed=42):
     return train_data, test_data
 
 # 创建固定的评估数据集
-def create_fixed_evaluation_dataset(test_data, num_samples=1000, seed=42):
+def create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPLES, seed=DataConfig.RANDOM_SEED):
     """
     创建固定的评估数据集，确保每次评估使用相同的样本
     这样可以准确衡量模型的进步情况
@@ -477,8 +460,8 @@ def create_fixed_evaluation_dataset(test_data, num_samples=1000, seed=42):
     
     # 预先生成所有可能的样本
     all_possible_samples = []
-    context_length = 60
-    required_length = context_length + 3
+    context_length = DataConfig.CONTEXT_LENGTH
+    required_length = DataConfig.REQUIRED_LENGTH
     
     for stock_idx, stock_data in enumerate(test_data):
         if len(stock_data) < required_length:
@@ -497,13 +480,13 @@ def create_fixed_evaluation_dataset(test_data, num_samples=1000, seed=42):
                 
             cumulative_return = (end_price - start_price) / start_price
             
-            # 确定类别标签
-            if cumulative_return >= 0.03:
-                target = 0  # 大涨
-            elif cumulative_return <= -0.02:
-                target = 1  # 大跌
-            else:
-                target = 2  # 震荡
+                    # 确定类别标签
+        if cumulative_return >= DataConfig.UPRISE_THRESHOLD:
+            target = 0  # 大涨
+        elif cumulative_return <= DataConfig.DOWNFALL_THRESHOLD:
+            target = 1  # 大跌
+        else:
+            target = 2  # 震荡
                 
             all_possible_samples.append((input_seq, target, stock_idx, start_idx))
     
@@ -534,7 +517,7 @@ def create_fixed_evaluation_dataset(test_data, num_samples=1000, seed=42):
     return eval_inputs, eval_targets
 
 # 批量评估函数
-def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=100):
+def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=EvaluationConfig.EVAL_BATCH_SIZE):
     """
     使用批处理进行快速评估
     """
@@ -570,29 +553,31 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=10
                 
                 # 应用特殊的评分规则
                 if prediction == target:
-                    score += 1
+                    score += EvaluationConfig.CORRECT_PREDICTION_SCORE
                     class_correct[target] += 1
                 elif target == 0 and prediction == 1:  # 上涨预测为下跌
-                    score -= 1
+                    score += EvaluationConfig.UPRISE_PREDICTED_DOWNFALL
                 elif target == 1 and prediction == 0:  # 下跌预测为上涨  
-                    score -= 2
+                    score += EvaluationConfig.DOWNFALL_PREDICTED_UPRISE
                 
                 total += 1
     
     return score, total, class_correct, class_total
 
 # 改进的训练函数
-def train_model(model, train_data, test_data, epochs, learning_rate, device, batch_size, batches_per_epoch):
+def train_model(model, train_data, test_data, epochs=TrainingConfig.EPOCHS, 
+               learning_rate=TrainingConfig.LEARNING_RATE, device=None, 
+               batch_size=TrainingConfig.BATCH_SIZE, batches_per_epoch=TrainingConfig.BATCHES_PER_EPOCH):
     """
     使用固定评估集的训练函数
     """
     # 创建固定的评估数据集（训练开始前创建一次）
-    eval_inputs, eval_targets = create_fixed_evaluation_dataset(test_data, num_samples=1000)
+    eval_inputs, eval_targets = create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPLES)
     
-    criterion = FocalLoss(alpha=[1.5, 2.0, 1.0], gamma=2.0)
+    criterion = FocalLoss(alpha=TrainingConfig.FOCAL_LOSS_ALPHA, gamma=TrainingConfig.FOCAL_LOSS_GAMMA)
     weight_adjuster = DynamicClassWeightAdjuster()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=TrainingConfig.WEIGHT_DECAY)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=TrainingConfig.SCHEDULER_STEP_SIZE, gamma=TrainingConfig.SCHEDULER_GAMMA)
     
     best_score = float('-inf')  # 改用得分而不是准确率
     
@@ -616,7 +601,7 @@ def train_model(model, train_data, test_data, epochs, learning_rate, device, bat
             output = model(batch_inputs)
             loss = criterion(output, batch_targets_tensor)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=TrainingConfig.GRADIENT_CLIP_NORM)
             optimizer.step()
             
             total_loss += loss.item()
@@ -631,7 +616,7 @@ def train_model(model, train_data, test_data, epochs, learning_rate, device, bat
         # 固定评估集评估
         print("正在评估模型性能...")
         score, total, class_correct, class_total = evaluate_model_batch(
-            model, eval_inputs, eval_targets, device, batch_size=100
+            model, eval_inputs, eval_targets, device, batch_size=EvaluationConfig.EVAL_BATCH_SIZE
         )
         
         # 打印详细结果
@@ -653,7 +638,7 @@ def train_model(model, train_data, test_data, epochs, learning_rate, device, bat
         # 保存最佳模型
         if score > best_score:
             best_score = score
-            torch.save(model.state_dict(), './out/EnhancedEquiNet_focal_best.pth')
+            torch.save(model.state_dict(), ModelSaveConfig.get_best_model_path())
             print(f'  ✓ 发现更好的模型！得分提升到: {score}')
         
         print("-" * 50)
@@ -662,42 +647,30 @@ if __name__ == "__main__":
     # 设置工作目录
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
     
-    # 检查GPU可用性
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if not torch.cuda.is_available():
-        print("CUDA 不可用，将使用 CPU 进行训练，训练速度可能较慢。")
-    else:
-        print(f"使用 GPU 进行训练: {torch.cuda.get_device_name()}")
+    # 打印配置摘要
+    print_config_summary()
+    
+    # 获取设备信息
+    device = DeviceConfig.print_device_info()
 
     # 创建输出目录
-    os.makedirs('./out', exist_ok=True)
+    os.makedirs(DataConfig.OUTPUT_DIR, exist_ok=True)
     
     # 使用改进的数据加载函数
     print("正在加载和预处理数据...")
-    train_data, test_data = load_and_preprocess_data('./data')
+    train_data, test_data = load_and_preprocess_data()
     print(f"训练数据: {len(train_data)} 只股票")
     print(f"测试数据: {len(test_data)} 只股票")
 
-    # 模型超参数
-    d_model = 128        # 模型维度（更高的维度通常能捕获更复杂的模式）
-    input_dim = 8        # 输入特征维度（OHLCV + 市值相关特征）
-    nhead = 8           # 注意力头数（会被分配给不同类型的专业化头）
-    num_layers = 4      # Transformer层数
-    output_dim = 3      # 输出类别数（上涨/下跌/震荡）
-
-    # 训练超参数  
-    epochs = 80                    # 训练轮数
-    learning_rate = 0.001          # 初始学习率
-    batch_size = 50  # GPU每次并行训练的样本数
-    batches_per_epoch = 20  # 相当于每轮（epochs） 20*50=1000 个样本
-
     print("正在创建 Transformer 模型...")
     model = EnhancedStockTransformer(
-        input_dim=input_dim, 
-        d_model=d_model, 
-        nhead=nhead, 
-        num_layers=num_layers, 
-        output_dim=output_dim
+        input_dim=ModelConfig.INPUT_DIM, 
+        d_model=ModelConfig.D_MODEL, 
+        nhead=ModelConfig.NHEAD, 
+        num_layers=ModelConfig.NUM_LAYERS, 
+        output_dim=ModelConfig.OUTPUT_DIM,
+        max_seq_len=ModelConfig.MAX_SEQ_LEN,
+        decay_factor=ModelConfig.DECAY_FACTOR
     ).to(device)
     
     # 打印模型参数数量
@@ -708,11 +681,10 @@ if __name__ == "__main__":
 
     print("开始训练...")
     # 使用带固定评估集的训练函数
-    train_model(model, train_data, test_data, epochs, learning_rate, device, batch_size, batches_per_epoch)
-    
+    train_model(model, train_data, test_data, device=device)
     
     # 保存最终模型
-    final_model_path = f'./out/EnhancedEquiNet_{d_model}.pth'
+    final_model_path = ModelSaveConfig.get_final_model_path(ModelConfig.D_MODEL)
     torch.save(model.state_dict(), final_model_path)
     print(f"训练完成！最终模型已保存到: {final_model_path}")
-    print("最佳模型已保存到: ./out/EnhancedEquiNet_best.pth")
+    print(f"最佳模型已保存到: {ModelSaveConfig.get_best_model_path()}")
