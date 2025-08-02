@@ -7,18 +7,20 @@
 ## 项目简介
 
  - EquiNet 旨在从0开始构建一个深度学习模型，通过对319只A股股票420天的历史数据进行建模，仅仅使用不到半小时的时间，即可训练出一个具备一定预测能力的模型EquiNet
- - EquiNet 基于 PyTorch 的深度学习项目，支持灵活参数配置和高效GPU训练。通过历史数据建模输出未来3天内上涨、下跌、平稳的概率分布。
+ - EquiNet 基于 PyTorch 的深度学习项目，支持灵活参数配置和高效GPU训练。通过历史数据建模输出未来3天内股票上涨的概率（0-1之间的连续值）。
+ - **最新版本采用二分类方案**：专注于预测股票是否会上涨，输出0-1之间的概率值，更符合实际交易需求。
 
 ## 主要特性
 
 - **Transformer 架构**：强大的时序建模能力，适合金融数据。
+- **二分类预测**：专注于预测股票是否会上涨，输出0-1之间的概率值。
+- **固定评估集**：使用固定的31个测试文件和评估样本，确保评估的一致性和可重复性。
 - **灵活参数配置**：支持自定义模型维度、层数、训练轮数等，适应不同硬件与需求。
-- **完全随机采样**：每轮训练/评估均从全体股票数据中随机采样，提升泛化能力。
 - **归一化处理**：每只股票独立归一化，消除价格量级影响。
 - **GPU加速**：自动检测CUDA，充分利用GPU资源。
 - **训练过程评估**：每轮训练后自动评估模型当前预测准确率。
 - **断点续训**：自动保存最佳模型权重，便于后续加载与继续训练。
-- **常规化预测**：只关注平常的规律，不关注市场极端状态时的规律。
+- **实用预测**：专注于预测股票上涨概率，更符合实际交易需求。
 
 ## 目录结构
 
@@ -52,6 +54,26 @@ EquiNet/
   - `marketrange`：大盘指数波动宽度
 - 数据来源：通达信
 
+## 模型输出说明
+
+### 二分类预测
+- **输出格式**：0-1之间的连续概率值
+- **预测逻辑**：预测未来3天内股票是否会上涨（涨幅≥1%）
+- **决策机制**：
+  - 概率 > 0.5 → 预测上涨，建议买入
+  - 概率 < 0.5 → 预测不上涨，建议不买
+- **风险控制**：
+  - 保守策略：概率 > 0.7 才买入
+  - 平衡策略：概率 > 0.6 买入
+  - 激进策略：概率 > 0.5 买入
+
+### 示例输出
+```
+股票A: 0.85 → 85%概率上涨 → 买入
+股票B: 0.35 → 35%概率上涨 → 不买
+股票C: 0.62 → 62%概率上涨 → 买入
+```
+
 ## 安装与环境
 
 - Python 3.8+
@@ -78,11 +100,20 @@ pip install torch pandas numpy tqdm
    ```
 
 3. **模型评估**
-   - 训练完成后，模型权重保存在`./out/EquiNet{d_model}.pth`。
-   - 可使用`src/test_best_model.py`对训练集、测试集、全集进行准确率评估：
+   - 训练完成后，模型权重保存在`./out/EnhancedEquiNet_{d_model}.pth`。
+   - 可使用`src/test_model.py`对模型进行评估：
      ```bash
-     python src/test_best_model.py
+     python src/test_model.py
      ```
+
+### 训练结果示例
+```
+Epoch 54 评估结果:
+  不上涨: 83/110 = 0.755
+  上涨: 33/90 = 0.367
+  总体准确率: 0.580
+  评估得分: 60.5 / 200 = 0.302
+```
 
 ### 常规训练流程
 1. **准备数据**
@@ -92,14 +123,14 @@ pip install torch pandas numpy tqdm
    ```bash
    python src/train.py
    ```
-   - 按提示输入模型参数（如模型维度、训练轮数等），程序会说明参数对模型效果和参数量的影响。
+   - 程序会自动使用配置文件中的参数进行训练。
    - 训练过程中显示进度、损失、学习率及每轮评估准确率。
 
 3. **模型评估**
-   - 训练完成后，模型权重保存在`./out/EquiNet{d_model}.pth`。
-   - 可使用`src/test_best_model.py`对训练集、测试集、全集进行准确率评估：
+   - 训练完成后，模型权重保存在`./out/EnhancedEquiNet_{d_model}.pth`。
+   - 可使用`src/test_model.py`对模型进行评估：
      ```bash
-     python src/test_best_model.py
+     python src/test_model.py
      ```
 
 ## 配置文件使用说明
@@ -133,11 +164,11 @@ pip install torch pandas numpy tqdm
 - **数据路径**: 数据目录、输出目录
 - **数据分割参数**: 测试集比例、随机种子
 - **样本生成参数**: 历史数据长度、预测天数
-- **类别阈值**: 大涨、大跌阈值
+- **二分类阈值**: 上涨阈值（1%）
 - **评估参数**: 评估样本数量
 
 #### 4. 评估参数 (EvaluationConfig)
-- **评分规则**: 正确预测得分、错误预测扣分
+- **评分规则**: 正确预测得分、假阳性惩罚、假阴性惩罚
 - **评估设置**: 评估样本数、批处理大小
 
 #### 5. 设备配置 (DeviceConfig)
@@ -219,21 +250,20 @@ TrainingConfig.BATCHES_PER_EPOCH = 10
 
 #### 处理类别不平衡
 ```python
-# 调整Focal Loss参数
-TrainingConfig.FOCAL_LOSS_ALPHA = [2.0, 2.5, 1.0]
-TrainingConfig.FOCAL_LOSS_GAMMA = 2.5
+# 调整二分类Focal Loss参数
+TrainingConfig.FOCAL_LOSS_ALPHA = [1.0, 1.0]  # 平衡权重
+TrainingConfig.FOCAL_LOSS_GAMMA = 2.0
 
-# 调整类别阈值
-DataConfig.UPRISE_THRESHOLD = 0.05
-DataConfig.DOWNFALL_THRESHOLD = -0.03
+# 调整上涨阈值
+DataConfig.UPRISE_THRESHOLD = 0.01  # 1%上涨阈值
 ```
 
 #### 调整评估策略
 ```python
 # 修改评分规则
 EvaluationConfig.CORRECT_PREDICTION_SCORE = 2
-EvaluationConfig.UPRISE_PREDICTED_DOWNFALL = -2
-EvaluationConfig.DOWNFALL_PREDICTED_UPRISE = -3
+EvaluationConfig.FALSE_POSITIVE_PENALTY = -1
+EvaluationConfig.FALSE_NEGATIVE_PENALTY = -0.5
 
 # 增加评估样本
 EvaluationConfig.EVAL_SAMPLES = 2000
@@ -270,21 +300,20 @@ TrainingConfig.BATCHES_PER_EPOCH = 10
 
 #### 处理类别不平衡
 ```python
-# 调整Focal Loss参数
-TrainingConfig.FOCAL_LOSS_ALPHA = [2.0, 2.5, 1.0]
-TrainingConfig.FOCAL_LOSS_GAMMA = 2.5
+# 调整二分类Focal Loss参数
+TrainingConfig.FOCAL_LOSS_ALPHA = [1.0, 1.0]  # 平衡权重
+TrainingConfig.FOCAL_LOSS_GAMMA = 2.0
 
-# 调整类别阈值
-DataConfig.UPRISE_THRESHOLD = 0.05
-DataConfig.DOWNFALL_THRESHOLD = -0.03
+# 调整上涨阈值
+DataConfig.UPRISE_THRESHOLD = 0.01  # 1%上涨阈值
 ```
 
 #### 调整评估策略
 ```python
 # 修改评分规则
 EvaluationConfig.CORRECT_PREDICTION_SCORE = 2
-EvaluationConfig.UPRISE_PREDICTED_DOWNFALL = -2
-EvaluationConfig.DOWNFALL_PREDICTED_UPRISE = -3
+EvaluationConfig.FALSE_POSITIVE_PENALTY = -1
+EvaluationConfig.FALSE_NEGATIVE_PENALTY = -0.5
 
 # 增加评估样本
 EvaluationConfig.EVAL_SAMPLES = 2000
@@ -324,6 +353,8 @@ EvaluationConfig.EVAL_SAMPLES = 2000
 
 ## 项目修改LOG
 
+- 2025.6.1: **重大更新** - 采用二分类方案，专注于预测股票是否会上涨，输出0-1之间的概率值，更符合实际交易需求。使用固定的31个测试文件和评估样本，确保评估的一致性和可重复性。模型准确率达到58%，接近60%目标。
+- 2025.6.1: **架构优化** - 重新设计模型架构，增加模型维度(128)和层数(3)，优化注意力头分配(价格3头、成交量2头、波动率2头、模式1头)，使用时间感知注意力机制，提升模型表达能力。
 - 2025.5.31:积分制成为默认机制，增加时间感知位置编码、Focal Loss损失函数、结合标准正弦余弦位置编码、指数衰减机制、种类差异化多头注意力机制、多尺度注意力，加入了残差连接和层归一化。
 - 2025.5.12:增加mark积分制判别最优模型,但保留原判别机制
 - 2025.5.1:项目start ~
@@ -364,4 +395,8 @@ EvaluationConfig.EVAL_SAMPLES = 2000
 - `层归一化`: 简单理解就是把每一层的输出"标准化"，让数值分布更稳定（防止某些神经元输出过大或过小），加速收敛（让梯度更平滑，模型收敛更快？）
 
 - `Focal Loss`:一种解决one-stage目标检测中正负样本数量极不平衡问题的损失函数，比如：股票中上涨的样本远远小于稳定的样本，这个时候稳定的样本的规律信息就可能会淹没上涨样本提供的信息，对于股票来说，样本不平衡问题是常态。
+
+- `二分类预测`: 将复杂的多分类问题简化为二分类问题，专注于预测股票是否会上涨。输出0-1之间的概率值，更直观易懂，符合实际交易决策需求。
+
+- `固定评估集`: 使用固定的测试文件和评估样本，确保每次评估使用相同的样本，提高评估结果的可重复性和可比性。
 
