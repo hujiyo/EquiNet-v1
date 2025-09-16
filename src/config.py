@@ -25,8 +25,6 @@ class ModelConfig:
     DROPOUT_RATE = 0.3               # Dropout比率（增加防止过拟合）
     ATTENTION_DROPOUT = 0.2          # 注意力Dropout比率
 
-    # 注意力机制参数（使用标准多头注意力，不人为分配头功能）
-
     # 时间感知注意力参数
     ATTENTION_WINDOW_SIZE = 20       # 注意力窗口大小（关注最近20天）
     TEMPORAL_DECAY = 0.05            # 时间衰减因子（更温和的衰减）
@@ -39,7 +37,7 @@ class TrainingConfig:
     EPOCHS = 20                     # 训练轮数（增加轮数以充分训练小模型）
     LEARNING_RATE = 0.002            # 初始学习率（提高学习率）
     BATCH_SIZE = 128                 # GPU每次并行训练的样本数（增加批大小）
-    BATCHES_PER_EPOCH = 15           # 每轮训练的批次数（减少批次数）
+    BATCHES_PER_EPOCH = 30           # 每轮训练的批次数（减少批次数）
 
     # 优化器参数
     WEIGHT_DECAY = 1e-5              # 权重衰减
@@ -48,9 +46,6 @@ class TrainingConfig:
     # 学习率调度器参数
     SCHEDULER_STEP_SIZE = 10         # 学习率调度步长
     SCHEDULER_GAMMA = 0.5            # 学习率衰减因子
-
-    # 动态加权Focal Loss参数
-    FOCAL_LOSS_GAMMA = 2.5                # Focal Loss聚焦参数（增加聚焦强度）
 
 # ==================== 数据参数 ====================
 class DataConfig:

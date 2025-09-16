@@ -1,11 +1,11 @@
 '''
 训练脚本
 
-评分制度保持不变：
-提供1000次预测机会，预测正确加一分
+评分制度（以代码实现为准）：
+提供预测机会，预测正确加1分
 预测错误则按下面策略处理：
-1.上涨的股票预测为下跌：-1分 
-2.下跌的股票预测为上涨：-2分 
+1.假阳性（预测上涨但实际不上涨）：-1分 
+2.假阴性（预测不上涨但实际上涨）：-0.5分 
 3.其余情况不加分也不扣分。
 '''
 
@@ -13,65 +13,19 @@ import os,torch,torch.nn as nn,torch.optim as optim,pandas as pd,numpy as np
 import random
 import math
 import torch.nn.functional as F
+from sklearn.metrics import roc_auc_score
 from config import (ModelConfig, TrainingConfig, DataConfig, 
                    EvaluationConfig, DeviceConfig, ModelSaveConfig,
                    print_config_summary)
 
-# Focal Loss实现
-class FocalLoss(nn.Module):
+# 动态加权BCE损失函数实现
+class DynamicWeightedBCE(nn.Module):
     """
-    Focal Loss专门用于处理类别不平衡问题
-    FL(p_t) = -α_t * (1-p_t)^γ * log(p_t)
-    
-    参数说明：
-    - alpha: 类别权重，用于平衡正负样本
-    - gamma: 聚焦参数，减少易分类样本的权重
-    - reduction: 损失的归约方式
-    """
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        if alpha is None:
-            alpha = [1.5, 2.0, 1.0]
-        # 注册为buffer，会自动跟随模型移动到相应设备
-        self.register_buffer('alpha', torch.tensor(alpha, dtype=torch.float))
-        self.gamma = gamma
-        self.reduction = reduction
-        
-    def forward(self, inputs, targets):
-        """
-        inputs: [batch_size, num_classes] 模型输出的logits
-        targets: [batch_size] 真实类别标签
-        """
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none')
-        pt = torch.exp(-ce_loss)
-        
-        targets = targets.to(self.alpha.device)
-        # 现在alpha自动在正确的设备上，不用检查
-        alpha_t = self.alpha[targets]  # 直接用，不用担心设备问题
-
-        # 保证 alpha_t, pt, ce_loss 在同一设备
-        device = inputs.device
-        alpha_t = alpha_t.to(device)
-        pt = pt.to(device)
-        ce_loss = ce_loss.to(device)
-        
-        focal_loss = alpha_t * (1 - pt) ** self.gamma * ce_loss
-        
-        if self.reduction == 'mean':
-            return focal_loss.mean()
-        elif self.reduction == 'sum':
-            return focal_loss.sum()
-        else:
-            return focal_loss
-
-class DynamicWeightedFocalLoss(nn.Module):
-    """
-    动态加权Focal Loss，根据每轮训练数据的正负样本比例动态调整权重
+    动态加权BCE损失函数，根据每轮训练数据的正负样本比例动态调整权重
     使用标准的类别不平衡处理公式：weight = total_samples / (num_classes * class_count)
     """
-    def __init__(self, gamma=2.0, reduction='mean'):
-        super(DynamicWeightedFocalLoss, self).__init__()
-        self.gamma = gamma                      # Focal Loss聚焦参数
+    def __init__(self, reduction='mean'):
+        super(DynamicWeightedBCE, self).__init__()
         self.reduction = reduction
         
         # 动态权重，会在训练过程中更新
@@ -122,23 +76,16 @@ class DynamicWeightedFocalLoss(nn.Module):
         # 计算BCE损失
         bce_loss = F.binary_cross_entropy_with_logits(inputs.squeeze(), targets, reduction='none')
         
-        # 计算概率
-        probs = torch.sigmoid(inputs).squeeze()
-        pt = torch.where(targets == 1, probs, 1 - probs)
-        
-        # Focal Loss基础计算
-        focal_loss = (1 - pt) ** self.gamma * bce_loss
-        
         # 应用动态权重
         weights = torch.where(targets == 1, self.positive_weight, self.negative_weight)
-        weighted_focal_loss = weights * focal_loss
+        weighted_loss = weights * bce_loss
         
         if self.reduction == 'mean':
-            return weighted_focal_loss.mean()
+            return weighted_loss.mean()
         elif self.reduction == 'sum':
-            return weighted_focal_loss.sum()
+            return weighted_loss.sum()
         else:
-            return weighted_focal_loss
+            return weighted_loss
 
 
 # 时间感知的位置编码类
@@ -167,14 +114,13 @@ class TimeAwarePositionalEncoding(nn.Module):
         pe_slice = self.pe[:seq_len, :].unsqueeze(0)
         return self.norm(x + pe_slice)
 
-# 标准的多头注意力机制
-class StandardMultiHeadAttention(nn.Module):
+class MultiHeadAttention(nn.Module):
     """
     标准的多头注意力机制
     让模型自动学习每个头应该关注什么特征，不人为干预
     """
     def __init__(self, d_model, nhead):
-        super(StandardMultiHeadAttention, self).__init__()
+        super(MultiHeadAttention, self).__init__()
         self.d_model = d_model
         self.nhead = nhead
         
@@ -203,16 +149,16 @@ class StandardMultiHeadAttention(nn.Module):
         return output
 
 # 增强的注意力层
-class EnhancedAttentionLayer(nn.Module):
+class TransformerLayer(nn.Module):
     """
     增强的注意力层，使用标准的多头注意力机制
     设计理念：让模型自动学习应该关注什么特征，不人为干预
     """
     def __init__(self, d_model, nhead):
-        super(EnhancedAttentionLayer, self).__init__()
+        super(TransformerLayer, self).__init__()
         
         # 使用标准多头注意力
-        self.attention = StandardMultiHeadAttention(d_model, nhead)
+        self.attention = MultiHeadAttention(d_model, nhead)
         
         # 前馈网络，用于进一步处理注意力的输出
         self.feed_forward = nn.Sequential(
@@ -282,7 +228,7 @@ class EnhancedStockTransformer(nn.Module):
         self.pos_encoding = TimeAwarePositionalEncoding(d_model, max_seq_len, decay_factor)
         
         self.layers = nn.ModuleList([
-            EnhancedAttentionLayer(d_model, nhead) 
+            TransformerLayer(d_model, nhead) 
             for _ in range(num_layers)
         ])
         
@@ -678,6 +624,7 @@ def create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPL
 def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=EvaluationConfig.EVAL_BATCH_SIZE):
     """
     使用批处理进行快速评估（二分类）
+    返回: (score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, auc_score)
     """
     model.eval()
     score = 0
@@ -688,6 +635,10 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=Ev
     # 新增：预测统计
     pred_positive_correct = 0  # 预测上涨且正确的数量
     pred_positive_total = 0    # 预测上涨的总数量
+    
+    # 新增：用于AUC计算的列表
+    all_probabilities = []
+    all_targets = []
     
     num_samples = len(eval_inputs)
     num_batches = (num_samples + batch_size - 1) // batch_size
@@ -706,6 +657,10 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=Ev
             batch_outputs = model(batch_inputs)  # [batch_size, 1]
             batch_probabilities = torch.sigmoid(batch_outputs).cpu().numpy().flatten()
             batch_predictions = (batch_probabilities > 0.5).astype(int)  # 概率>0.5预测为上涨
+            
+            # 收集所有概率和标签用于AUC计算
+            all_probabilities.extend(batch_probabilities)
+            all_targets.extend(batch_targets)
             
             # 批量计算得分
             for j in range(len(batch_targets)):
@@ -731,7 +686,14 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=Ev
                 
                 total += 1
     
-    return score, total, class_correct, class_total, pred_positive_correct, pred_positive_total
+    # 计算AUC
+    try:
+        auc_score = roc_auc_score(all_targets, all_probabilities)
+    except ValueError:
+        # 如果所有标签都是同一类，AUC无法计算
+        auc_score = 0.5  # 随机分类器的AUC
+    
+    return score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, auc_score
 
 def calculate_test_loss(model, eval_inputs, eval_targets, criterion, device, batch_size=EvaluationConfig.EVAL_BATCH_SIZE):
     """
@@ -760,6 +722,59 @@ def calculate_test_loss(model, eval_inputs, eval_targets, criterion, device, bat
     
     avg_loss = total_loss / num_batches
     return avg_loss
+
+def print_sample_predictions(model, eval_inputs, eval_targets, device, num_samples=10, epoch=None):
+    """
+    随机挑选样本并打印模型的输出值，用于观察预测集中的问题
+    """
+    model.eval()
+    
+    # 随机选择样本索引
+    total_samples = len(eval_inputs)
+    if num_samples > total_samples:
+        num_samples = total_samples
+    
+    # 使用当前epoch作为随机种子，确保每轮选择不同的样本
+    if epoch is not None:
+        np.random.seed(DataConfig.RANDOM_SEED + epoch)
+    
+    sample_indices = np.random.choice(total_samples, size=num_samples, replace=False)
+    sample_indices = sorted(sample_indices)  # 排序以便观察
+    
+    print(f"  随机样本预测详情 (第{epoch}轮):")
+    print(f"  {'样本':<4} {'真实标签':<8} {'模型输出':<12} {'预测概率':<10} {'预测标签':<8} {'预测结果':<8}")
+    print(f"  {'-'*4} {'-'*8} {'-'*12} {'-'*10} {'-'*8} {'-'*8}")
+    
+    with torch.no_grad():
+        for i, idx in enumerate(sample_indices):
+            # 获取单个样本
+            sample_input = torch.tensor(eval_inputs[idx:idx+1], dtype=torch.float32).to(device)
+            true_label = eval_targets[idx]
+            
+            # 模型预测
+            model_output = model(sample_input)
+            raw_output = model_output.cpu().item()
+            probability = torch.sigmoid(model_output).cpu().item()
+            predicted_label = 1 if probability > 0.5 else 0
+            
+            # 判断预测结果
+            if predicted_label == int(true_label):
+                result = "✓正确"
+            else:
+                if int(true_label) == 1 and predicted_label == 0:
+                    result = "✗漏涨"
+                elif int(true_label) == 0 and predicted_label == 1:
+                    result = "✗误涨"
+                else:
+                    result = "✗错误"
+            
+            # 格式化输出
+            true_label_str = "上涨" if int(true_label) == 1 else "不上涨"
+            pred_label_str = "上涨" if predicted_label == 1 else "不上涨"
+            
+            print(f"  {i+1:<4} {true_label_str:<8} {raw_output:<12.4f} {probability:<10.4f} {pred_label_str:<8} {result:<8}")
+    
+    print()  # 空行
 
 # 预计算训练数据集函数
 def precompute_training_dataset(train_data, train_stock_info, train_weights, 
@@ -802,10 +817,8 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
     # 创建固定的评估数据集（训练开始前创建一次）
     eval_inputs, eval_targets = create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPLES)
     
-    # 使用动态加权Focal Loss，根据每轮训练数据的正负样本比例动态调整权重
-    criterion = DynamicWeightedFocalLoss(
-        gamma=TrainingConfig.FOCAL_LOSS_GAMMA              # Focal Loss聚焦参数
-    )
+    # 使用动态加权BCE损失函数，根据每轮训练数据的正负样本比例动态调整权重
+    criterion = DynamicWeightedBCE()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=TrainingConfig.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=TrainingConfig.SCHEDULER_STEP_SIZE, gamma=TrainingConfig.SCHEDULER_GAMMA)
     
@@ -875,12 +888,15 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
         scheduler.step()
         
         # 固定评估集评估
-        score, total, class_correct, class_total, pred_positive_correct, pred_positive_total = evaluate_model_batch(
+        score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, auc_score = evaluate_model_batch(
             model, eval_inputs, eval_targets, device, batch_size=EvaluationConfig.EVAL_BATCH_SIZE
         )
         
         # 计算测试集损失
         test_loss = calculate_test_loss(model, eval_inputs, eval_targets, criterion, device, batch_size=EvaluationConfig.EVAL_BATCH_SIZE)
+        
+        # 随机挑选10组样本打印模型输出值
+        print_sample_predictions(model, eval_inputs, eval_targets, device, num_samples=10, epoch=epoch+1)
         
         # 打印详细结果
         class_names = ['不上涨', '上涨']
@@ -903,6 +919,7 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
         
         print(f'  总体准确率: {overall_acc:.3f}')
         print(f'  评估得分: {score} / {total} = {avg_score:.3f}')
+        print(f'  AUC得分: {auc_score:.4f}')
         print(f'  测试集损失: {test_loss:.4f}')
         
         # 保存最佳模型

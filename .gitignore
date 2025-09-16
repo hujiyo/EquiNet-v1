@@ -3,3 +3,4 @@ src/out/
 __pycache__/
 src/senc/
 datdeal/
+out*/
