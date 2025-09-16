@@ -1,14 +1,5 @@
 '''
-优化版训练脚本---
-主要改进：
-1. 增加了时间感知的位置编码，结合了标准的正弦余弦位置编码，让每个时间位置都有独特标识，
-让模型知道哪些数据是近期的，哪些是远期的：使用指数衰减：最新的第60天权重为1.0，往前每天权重递减
-2. 设计了专业化的多头注意力机制，不同的头关注不同类型的市场信号：将8个注意力头分成4类：价格趋势头、成交量头、波动率头、综合模式头
-每类头专门学习特定类型的市场信号
-用可学习权重自动融合不同类型的输出
-3. 添加了多尺度注意力，捕获短期、中期、长期的不同模式：同时捕获短期(5-10天)、中期(15-30天)、长期(整个60天)模式
-不同尺度的信息通过可学习权重进行融合
-加入了残差连接和层归一化，提升训练稳定性
+训练脚本
 
 评分制度保持不变：
 提供1000次预测机会，预测正确加一分
@@ -73,47 +64,51 @@ class FocalLoss(nn.Module):
         else:
             return focal_loss
 
-class WeightedFocalLoss(nn.Module):
+class DynamicWeightedFocalLoss(nn.Module):
     """
-    加权Focal Loss，根据评分规则调整类别权重
-    
-    评分规则：
-    - 预测正确：+1分
-    - 假阳性（预测上涨但实际不上涨）：-1分
-    - 假阴性（预测不上涨但实际上涨）：-0.5分
-    
-    权重调整说明：
-    - 由于假阳性惩罚更重，我们给负样本（不上涨）更高的权重
-    - 这样可以引导模型更保守地预测，减少假阳性
-    
-    调整指南：
-    1. 如果想更保守预测（减少假阳性）：
-       - 增加 negative_weight（如 2.5, 3.0）
-       - 减少 positive_weight（如 0.8, 0.5）
-    
-    2. 如果想更积极预测（减少假阴性）：
-       - 减少 negative_weight（如 1.5, 1.0）
-       - 增加 positive_weight（如 1.2, 1.5）
-    
-    3. 如果想平衡预测：
-       - 设置 negative_weight = 2.0, positive_weight = 1.0
-       - 这反映了评分规则中假阳性惩罚是假阴性的2倍
-    
-    4. 如果想更重视Focal Loss的聚焦效果：
-       - 增加 gamma 值（如 3.0, 4.0）
-       - 这会进一步减少易分类样本的权重
-    
-    5. 如果想更重视类别平衡：
-       - 调整 alpha 值
-       - alpha > 1 更重视正样本，alpha < 1 更重视负样本
+    动态加权Focal Loss，根据每轮训练数据的正负样本比例动态调整权重
+    使用标准的类别不平衡处理公式：weight = total_samples / (num_classes * class_count)
     """
-    def __init__(self, positive_weight=1.0, negative_weight=2.0, gamma=2.0, alpha=1.0, reduction='mean'):
-        super(WeightedFocalLoss, self).__init__()
-        self.positive_weight = positive_weight  # 正样本（上涨）权重
-        self.negative_weight = negative_weight  # 负样本（不上涨）权重
+    def __init__(self, gamma=2.0, reduction='mean'):
+        super(DynamicWeightedFocalLoss, self).__init__()
         self.gamma = gamma                      # Focal Loss聚焦参数
-        self.alpha = alpha                      # 类别平衡参数
         self.reduction = reduction
+        
+        # 动态权重，会在训练过程中更新
+        self.register_buffer('positive_weight', torch.tensor(1.0))
+        self.register_buffer('negative_weight', torch.tensor(1.0))
+        
+    def update_weights(self, targets):
+        """
+        根据当前批次的目标标签更新权重
+        使用标准的类别不平衡处理公式：weight = total_samples / (num_classes * class_count)
+        targets: [batch_size] 真实标签 (0=不上涨, 1=上涨)
+        """
+        if isinstance(targets, torch.Tensor):
+            targets = targets.cpu().numpy()
+        
+        # 计算正负样本数量
+        positive_count = np.sum(targets == 1)
+        negative_count = np.sum(targets == 0)
+        total_count = len(targets)
+        
+        if total_count == 0:
+            return
+            
+        # 使用标准的类别不平衡权重公式
+        # weight = total_samples / (num_classes * class_count)
+        num_classes = 2  # 二分类：不上涨(0) 和 上涨(1)
+        
+        if positive_count > 0 and negative_count > 0:
+            # 标准类别权重计算
+            self.positive_weight = torch.tensor(total_count / (num_classes * positive_count))
+            self.negative_weight = torch.tensor(total_count / (num_classes * negative_count))
+            
+            # 限制权重范围，避免过度不平衡
+            max_weight = 5.0
+            min_weight = 0.1
+            self.positive_weight = torch.clamp(self.positive_weight, min_weight, max_weight)
+            self.negative_weight = torch.clamp(self.negative_weight, min_weight, max_weight)
         
     def forward(self, inputs, targets):
         """
@@ -134,15 +129,9 @@ class WeightedFocalLoss(nn.Module):
         # Focal Loss基础计算
         focal_loss = (1 - pt) ** self.gamma * bce_loss
         
-        # 根据评分规则应用权重
-        # 负样本（不上涨）权重更高，因为假阳性惩罚更重
+        # 应用动态权重
         weights = torch.where(targets == 1, self.positive_weight, self.negative_weight)
         weighted_focal_loss = weights * focal_loss
-        
-        # 应用类别平衡权重（可选）
-        if self.alpha != 1.0:
-            alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
-            weighted_focal_loss = alpha_t * weighted_focal_loss
         
         if self.reduction == 'mean':
             return weighted_focal_loss.mean()
@@ -151,45 +140,6 @@ class WeightedFocalLoss(nn.Module):
         else:
             return weighted_focal_loss
 
-# 动态类别权重调整器
-class DynamicClassWeightAdjuster:
-    """
-    动态调整类别权重，根据训练过程中的类别分布实时调整
-    """
-    def __init__(self, num_classes=3, window_size=TrainingConfig.DYNAMIC_WEIGHT_WINDOW_SIZE):
-        self.num_classes = num_classes
-        self.window_size = window_size
-        self.class_counts = np.zeros(num_classes)
-        self.total_samples = 0
-        
-    def update(self, targets):
-        """更新类别计数"""
-        if isinstance(targets, torch.Tensor):
-            targets = targets.cpu().numpy()
-        
-        unique, counts = np.unique(targets, return_counts=True)
-        for cls, count in zip(unique, counts):
-            self.class_counts[cls] += count
-            self.total_samples += count
-    
-    def get_weights(self):
-        """计算当前的类别权重"""
-        if self.total_samples == 0:
-            return [1.0, 1.0, 1.0]
-        
-        # 计算每个类别的频率
-        frequencies = self.class_counts / self.total_samples
-        
-        # 使用逆频率作为权重，并平滑处理
-        weights = 1.0 / (frequencies + 1e-6)  # 加小数防止除零
-        
-        # 归一化权重
-        weights = weights / np.mean(weights)
-        
-        # 限制权重范围，避免过度不平衡
-        weights = np.clip(weights, TrainingConfig.DYNAMIC_WEIGHT_MIN, TrainingConfig.DYNAMIC_WEIGHT_MAX)
-        
-        return weights.tolist()
 
 # 时间感知的位置编码类
 class TimeAwarePositionalEncoding(nn.Module):
@@ -217,71 +167,24 @@ class TimeAwarePositionalEncoding(nn.Module):
         pe_slice = self.pe[:seq_len, :].unsqueeze(0)
         return self.norm(x + pe_slice)
 
-# 专业化的多头注意力机制
-class SpecializedMultiHeadAttention(nn.Module):
+# 标准的多头注意力机制
+class StandardMultiHeadAttention(nn.Module):
     """
-    专业化多头注意力机制
-    设计理念：股票数据中价格和成交量是最重要的特征，应该给更多注意力
+    标准的多头注意力机制
+    让模型自动学习每个头应该关注什么特征，不人为干预
     """
     def __init__(self, d_model, nhead):
-        super(SpecializedMultiHeadAttention, self).__init__()
+        super(StandardMultiHeadAttention, self).__init__()
         self.d_model = d_model
         self.nhead = nhead
-        self.head_dim = d_model // nhead
         
         assert d_model % nhead == 0
         
-        # 使用配置文件中的头分配
-        self.price_heads = ModelConfig.PRICE_HEADS
-        self.volume_heads = ModelConfig.VOLUME_HEADS
-        self.volatility_heads = ModelConfig.VOLATILITY_HEADS
-        self.pattern_heads = ModelConfig.PATTERN_HEADS
-        
-        # 确保头数总和等于nhead
-        total_heads = self.price_heads + self.volume_heads + self.volatility_heads + self.pattern_heads
-        if total_heads != nhead:
-            print(f"警告: 注意力头分配不匹配。配置: {total_heads}, 需要: {nhead}")
-            # 自动调整以匹配nhead
-            if total_heads < nhead:
-                self.pattern_heads += (nhead - total_heads)
-            else:
-                self.pattern_heads = max(0, self.pattern_heads - (total_heads - nhead))
-        
-        # 创建专业化注意力层（确保每个头都能整除d_model）
-        # 计算每个头的维度
-        self.price_dim = d_model // nhead * self.price_heads
-        self.volume_dim = d_model // nhead * self.volume_heads
-        self.volatility_dim = d_model // nhead * self.volatility_heads
-        self.pattern_dim = d_model // nhead * self.pattern_heads
-        
-        # 创建投影层
-        self.price_proj = nn.Linear(d_model, self.price_dim)
-        self.volume_proj = nn.Linear(d_model, self.volume_dim)
-        self.volatility_proj = nn.Linear(d_model, self.volatility_dim)
-        self.pattern_proj = nn.Linear(d_model, self.pattern_dim)
-        
-        # 创建注意力层
-        self.price_attention = nn.MultiheadAttention(self.price_dim, self.price_heads, batch_first=True)
-        self.volume_attention = nn.MultiheadAttention(self.volume_dim, self.volume_heads, batch_first=True) 
-        self.volatility_attention = nn.MultiheadAttention(self.volatility_dim, self.volatility_heads, batch_first=True)
-        
-        # 处理pattern_heads为0的情况
-        if self.pattern_heads > 0:
-            self.pattern_attention = nn.MultiheadAttention(self.pattern_dim, self.pattern_heads, batch_first=True)
-        else:
-            self.pattern_attention = None
-        
-        # 创建输出投影层
-        total_dim = self.price_dim + self.volume_dim + self.volatility_dim
-        if self.pattern_heads > 0:
-            total_dim += self.pattern_dim
-        self.output_proj = nn.Linear(total_dim, d_model)
-        
-        # 可学习的融合权重（初始化为更重视价格和成交量）
-        self.fusion_weights = nn.Parameter(torch.tensor([0.4, 0.3, 0.2, 0.1]))  # 价格>成交量>波动率>模式
+        # 使用标准的MultiheadAttention
+        self.attention = nn.MultiheadAttention(d_model, nhead, batch_first=True)
         
         # 添加层归一化和残差连接支持
-        self.fusion_norm = nn.LayerNorm(d_model)
+        self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(ModelConfig.ATTENTION_DROPOUT)
         
     def forward(self, x, attn_mask=None):
@@ -292,42 +195,24 @@ class SpecializedMultiHeadAttention(nn.Module):
         if attn_mask is not None:
             mask = attn_mask.to(dtype=x.dtype, device=x.device)
 
-        # 投影到不同的特征空间
-        price_x = self.price_proj(x)
-        volume_x = self.volume_proj(x)
-        volatility_x = self.volatility_proj(x)
-        pattern_x = self.pattern_proj(x)
-
-        # 专业化注意力计算
-        price_out, _ = self.price_attention(price_x, price_x, price_x, attn_mask=mask)
-        volume_out, _ = self.volume_attention(volume_x, volume_x, volume_x, attn_mask=mask)
-        volatility_out, _ = self.volatility_attention(volatility_x, volatility_x, volatility_x, attn_mask=mask)
-        
-        # 处理pattern attention
-        if self.pattern_attention is not None:
-            pattern_out, _ = self.pattern_attention(pattern_x, pattern_x, pattern_x, attn_mask=mask)
-            concatenated = torch.cat([price_out, volume_out, volatility_out, pattern_out], dim=-1)
-        else:
-            concatenated = torch.cat([price_out, volume_out, volatility_out], dim=-1)
-        
-        # 投影回原始维度
-        fused_output = self.output_proj(concatenated)
+        # 标准注意力计算
+        attn_output, _ = self.attention(x, x, x, attn_mask=mask)
         
         # 残差连接 + 层归一化
-        output = self.fusion_norm(residual + self.dropout(fused_output))
+        output = self.norm(residual + self.dropout(attn_output))
         return output
 
-# 多尺度注意力层
+# 增强的注意力层
 class EnhancedAttentionLayer(nn.Module):
     """
-    增强的注意力层，使用更简单有效的方法
-    设计理念：股票预测最重要的是近期趋势，但也要考虑历史模式
+    增强的注意力层，使用标准的多头注意力机制
+    设计理念：让模型自动学习应该关注什么特征，不人为干预
     """
     def __init__(self, d_model, nhead):
         super(EnhancedAttentionLayer, self).__init__()
         
-        # 使用专业化多头注意力
-        self.attention = SpecializedMultiHeadAttention(d_model, nhead)
+        # 使用标准多头注意力
+        self.attention = StandardMultiHeadAttention(d_model, nhead)
         
         # 前馈网络，用于进一步处理注意力的输出
         self.feed_forward = nn.Sequential(
@@ -826,7 +711,6 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, device, batch_size=Ev
             for j in range(len(batch_targets)):
                 target = int(batch_targets[j])
                 prediction = batch_predictions[j]
-                probability = batch_probabilities[j]
                 
                 class_total[target] += 1
                 
@@ -877,13 +761,37 @@ def calculate_test_loss(model, eval_inputs, eval_targets, criterion, device, bat
     avg_loss = total_loss / num_batches
     return avg_loss
 
+# 预计算训练数据集函数
+def precompute_training_dataset(train_data, train_stock_info, train_weights, 
+                               batch_size, batches_per_epoch, seed=None):
+    """
+    预计算每轮训练所需的训练数据集
+    自动根据批大小和批数量计算需要的样本数
+    返回: (epoch_inputs, epoch_targets)
+    """
+    samples_per_epoch = batch_size * batches_per_epoch
+    
+    if seed is not None:
+        # 设置随机种子确保可重复性
+        np.random.seed(seed)
+        random.seed(seed)
+    
+    epoch_inputs = []
+    epoch_targets = []
+    
+    # 直接生成所有需要的样本
+    epoch_inputs, epoch_targets = generate_batch_samples_improved(
+        train_data, train_stock_info, train_weights, samples_per_epoch)
+    
+    return np.array(epoch_inputs), np.array(epoch_targets)
+
 # 改进的训练函数
 def train_model(model, train_data, test_data, train_stock_info, train_weights, epochs=TrainingConfig.EPOCHS, 
                learning_rate=TrainingConfig.LEARNING_RATE, device=None, 
                batch_size=TrainingConfig.BATCH_SIZE, batches_per_epoch=TrainingConfig.BATCHES_PER_EPOCH):
     """
-    使用固定评估集的训练函数
-    确保评估的一致性和可重复性
+    使用预计算训练数据集和固定评估集的训练函数
+    提高训练效率，确保评估的一致性
     """
     # 设置训练随机种子
     torch.manual_seed(DataConfig.RANDOM_SEED)
@@ -894,13 +802,9 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
     # 创建固定的评估数据集（训练开始前创建一次）
     eval_inputs, eval_targets = create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPLES)
     
-    # 使用加权Focal Loss，根据评分规则调整权重
-    # 负样本权重更高，因为假阳性惩罚更重
-    criterion = WeightedFocalLoss(
-        positive_weight=TrainingConfig.POSITIVE_WEIGHT,      # 正样本（上涨）权重
-        negative_weight=TrainingConfig.NEGATIVE_WEIGHT,      # 负样本（不上涨）权重，反映评分规则
-        gamma=TrainingConfig.FOCAL_LOSS_GAMMA,              # Focal Loss聚焦参数
-        alpha=TrainingConfig.FOCAL_LOSS_ALPHA               # 类别平衡参数
+    # 使用动态加权Focal Loss，根据每轮训练数据的正负样本比例动态调整权重
+    criterion = DynamicWeightedFocalLoss(
+        gamma=TrainingConfig.FOCAL_LOSS_GAMMA              # Focal Loss聚焦参数
     )
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=TrainingConfig.WEIGHT_DECAY)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=TrainingConfig.SCHEDULER_STEP_SIZE, gamma=TrainingConfig.SCHEDULER_GAMMA)
@@ -910,22 +814,44 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
     for epoch in range(epochs):
         model.train()
         total_loss = 0
-        batch_targets = []
         
         # 训练阶段
         print(f'Epoch {epoch + 1}/{epochs}, LR: {scheduler.get_last_lr()[0]:.6f}')
         
+        # 预计算当前轮次的训练数据
+        epoch_seed = DataConfig.RANDOM_SEED + epoch  # 每轮使用不同的种子确保数据多样性
+        epoch_inputs, epoch_targets = precompute_training_dataset(
+            train_data, train_stock_info, train_weights, batch_size, batches_per_epoch, epoch_seed)
+        
+        # 根据本轮训练数据的正负样本比例动态更新损失函数权重
+        criterion.update_weights(epoch_targets)
+        
+        # 打印本轮权重信息
+        positive_count = np.sum(epoch_targets == 1)
+        negative_count = np.sum(epoch_targets == 0)
+        total_count = len(epoch_targets)
+        positive_ratio = positive_count / total_count if total_count > 0 else 0
+        negative_ratio = negative_count / total_count if total_count > 0 else 0
+        
+        print(f'  本轮数据分布: 正样本={positive_count}({positive_ratio:.1%}), 负样本={negative_count}({negative_ratio:.1%})')
+        print(f'  动态权重: 正样本权重={criterion.positive_weight.item():.3f}, 负样本权重={criterion.negative_weight.item():.3f}')
+        
+        # 将预计算的数据转换为tensor并移到设备上
+        epoch_inputs_tensor = torch.tensor(epoch_inputs, dtype=torch.float32).to(device)
+        epoch_targets_tensor = torch.tensor(epoch_targets, dtype=torch.float32).to(device)
+        
+        # 训练循环：使用预计算的数据
         for step in range(batches_per_epoch):
-            # 使用改进的批量生成函数
-            batch_inputs, batch_targets_np = generate_batch_samples_improved(train_data, train_stock_info, train_weights, batch_size)
-            batch_targets.extend(batch_targets_np.tolist())
+            start_idx = step * batch_size
+            end_idx = min((step + 1) * batch_size, len(epoch_inputs_tensor))
             
-            batch_inputs = torch.tensor(batch_inputs, dtype=torch.float32).to(device)
-            batch_targets_tensor = torch.tensor(batch_targets_np, dtype=torch.float32).to(device)
+            # 从预计算的数据中取一个batch
+            batch_inputs = epoch_inputs_tensor[start_idx:end_idx]
+            batch_targets = epoch_targets_tensor[start_idx:end_idx]
             
             optimizer.zero_grad()
             output = model(batch_inputs)
-            loss = criterion(output, batch_targets_tensor)
+            loss = criterion(output, batch_targets)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=TrainingConfig.GRADIENT_CLIP_NORM)
             optimizer.step()
@@ -935,10 +861,15 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
             # 实时更新进度显示
             progress = (step + 1) / batches_per_epoch * 100
             avg_loss = total_loss / (step + 1)
-            print(f'\r  进度: {progress:.1f}% ({step + 1}/{batches_per_epoch}), 平均损失: {avg_loss:.4f}', end='', flush=True)
+            print(f'\r  训练进度: {progress:.1f}% ({step + 1}/{batches_per_epoch}), 平均损失: {avg_loss:.4f}', end='', flush=True)
         
         print()  # 换行
         print()  # 空行
+        
+        # 清理预计算的数据以释放内存
+        del epoch_inputs_tensor, epoch_targets_tensor
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         # 更新学习率
         scheduler.step()

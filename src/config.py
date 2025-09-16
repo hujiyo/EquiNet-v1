@@ -25,13 +25,9 @@ class ModelConfig:
     DROPOUT_RATE = 0.3               # Dropout比率（增加防止过拟合）
     ATTENTION_DROPOUT = 0.2          # 注意力Dropout比率
 
-    # 专业化注意力头分配（简化分配）
-    PRICE_HEADS = 2                  # 价格趋势头数量（最重要）
-    VOLUME_HEADS = 1                 # 成交量头数量（次重要）
-    VOLATILITY_HEADS = 1             # 波动率头数量
-    PATTERN_HEADS = 0                # 综合模式头数量（移除，但需要处理）
+    # 注意力机制参数（使用标准多头注意力，不人为分配头功能）
 
-    # 简化多尺度注意力参数（使用更简单有效的方法）
+    # 时间感知注意力参数
     ATTENTION_WINDOW_SIZE = 20       # 注意力窗口大小（关注最近20天）
     TEMPORAL_DECAY = 0.05            # 时间衰减因子（更温和的衰减）
 
@@ -53,25 +49,8 @@ class TrainingConfig:
     SCHEDULER_STEP_SIZE = 10         # 学习率调度步长
     SCHEDULER_GAMMA = 0.5            # 学习率衰减因子
 
-    '''
-    # 更保守预测
-    POSITIVE_WEIGHT = 0.8
-    NEGATIVE_WEIGHT = 2.5
-
-    # 更积极预测  
-    POSITIVE_WEIGHT = 1.2
-    NEGATIVE_WEIGHT = 1.5
-    '''
-    # 加权Focal Loss参数（根据评分规则调整）
-    POSITIVE_WEIGHT = 1.5                  # 正样本（上涨）权重（提高，因为正样本更少）
-    NEGATIVE_WEIGHT = 1.0                  # 负样本（不上涨）权重（降低，平衡类别）
+    # 动态加权Focal Loss参数
     FOCAL_LOSS_GAMMA = 2.5                # Focal Loss聚焦参数（增加聚焦强度）
-    FOCAL_LOSS_ALPHA = 1.0                # 类别平衡参数（1.0表示不额外调整）
-
-    # 动态权重调整参数
-    DYNAMIC_WEIGHT_WINDOW_SIZE = 1000    # 动态权重调整窗口大小
-    DYNAMIC_WEIGHT_MIN = 0.5             # 最小权重
-    DYNAMIC_WEIGHT_MAX = 3.0             # 最大权重
 
 # ==================== 数据参数 ====================
 class DataConfig:
