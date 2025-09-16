@@ -1,5 +1,5 @@
 src/out/
 .vs/
-src/__pycache__/
+__pycache__/
 src/senc/
 datdeal/
