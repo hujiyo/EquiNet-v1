@@ -72,8 +72,7 @@ class DataConfig:
     REQUIRED_LENGTH = CONTEXT_LENGTH + FUTURE_DAYS  # 总需求长度
 
     # 二分类阈值（上涨/不上涨）
-    UPRISE_THRESHOLD = 0.02          # 上涨阈值（2%，超过2%算上涨）
-    DOWNFALL_THRESHOLD = -0.02       # 下跌阈值（-2%，低于-2%算下跌）
+    UPRISE_THRESHOLD = 0.06          # 上涨阈值（6%，超过6%算上涨）
 
     # 评估参数
     EVAL_SAMPLES = 200               # 评估样本数量
@@ -83,8 +82,8 @@ class DataConfig:
 class EvaluationConfig:
     """评估相关参数"""
     # 新评分规则（基于预测上涨和实际涨跌幅）
-    UPRISE_CORRECT_HIGH_SCORE = 1      # 预测上涨且实际上涨≥2%
-    UPRISE_CORRECT_LOW_SCORE = 0.5      # 预测上涨且实际涨0-2%
+    UPRISE_CORRECT_HIGH_SCORE = 1      # 预测上涨且实际上涨≥阈值%
+    UPRISE_CORRECT_LOW_SCORE = 0.5      # 预测上涨且实际涨0-阈值%
     UPRISE_FALSE_SMALL_PENALTY = -1     # 预测上涨但实际下跌<2%
     UPRISE_FALSE_LARGE_PENALTY = -2     # 预测上涨但实际下跌≥2%
     # 其余情况（预测不上涨）：不改变分数

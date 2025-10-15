@@ -452,7 +452,7 @@ def generate_single_sample_improved(all_data, stock_info_list, stock_weights):
         cumulative_return = (end_price - start_price) / start_price
         
         # 二分类标签：上涨为1，不上涨为0
-        if cumulative_return >= DataConfig.UPRISE_THRESHOLD:      # 涨幅≥2%：上涨
+        if cumulative_return >= DataConfig.UPRISE_THRESHOLD:      # 涨幅≥阈值%：上涨
             target = 1.0
         else:                              # 其他情况：不上涨
             target = 0.0
@@ -639,9 +639,9 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
                 
                 # 应用新的评分规则
                 if prediction == 1:  # 只有预测上涨时才计算分数
-                    if actual_return >= 0.02:  # 实际上涨≥2%
+                    if actual_return >= DataConfig.UPRISE_THRESHOLD:  # 实际上涨≥阈值%
                         score += EvaluationConfig.UPRISE_CORRECT_HIGH_SCORE
-                    elif actual_return >= 0:  # 实际涨0-2%
+                    elif actual_return >= 0:  # 实际涨0-阈值%
                         score += EvaluationConfig.UPRISE_CORRECT_LOW_SCORE
                     elif actual_return >= -0.02:  # 实际下跌<2%
                         score += EvaluationConfig.UPRISE_FALSE_SMALL_PENALTY
