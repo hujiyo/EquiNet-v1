@@ -256,6 +256,10 @@ python src/test_model.py
 - 邮箱: hj18914255909@outlook.com || Mhuixs.db@outlook.com hujiyo
 - WeChat: wx17601516389
 
+## 进入炼丹交流群
+
+- 加V：wx17601516389后回复“炼丹交流群”即可
+
 ## 致谢
 
 1. 感谢通达信提供的股票数据（虽然我是买了初级会员才获得的数据的~QvQ~）。
