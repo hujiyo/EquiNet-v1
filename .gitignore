@@ -6,3 +6,5 @@ datdeal/
 out*/
 note
 good/
+*.xlsx
+*.7z

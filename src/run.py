@@ -46,16 +46,16 @@ if __name__ == "__main__":
     # 创建固定评估数据集（注意：create_fixed_evaluation_dataset 返回3个值）
     print("\n正在创建评估数据集...")
     eval_inputs, eval_targets, eval_cumulative_returns = create_fixed_evaluation_dataset(
-        test_data, num_samples=DataConfig.EVAL_SAMPLES
+        test_data, test_stock_info, num_samples=DataConfig.EVAL_SAMPLES
     )
     
     # 创建损失函数（使用 train.py 中的 DynamicWeightedBCE）
     criterion = DynamicWeightedBCE()
     criterion.update_weights(eval_targets)  # 根据评估数据更新权重
     
-    # 评估模型（注意：evaluate_model_batch 返回8个值）
+    # 评估模型（注意：evaluate_model_batch 返回10个值）
     print("\n正在评估模型...")
-    score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score = evaluate_model_batch(
+    score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, score_count = evaluate_model_batch(
         model, eval_inputs, eval_targets, eval_cumulative_returns, device
     )
     
@@ -83,12 +83,23 @@ if __name__ == "__main__":
         print(f'非负准确率: {pred_non_negative}/{pred_positive_total} = {non_negative_rate:.3f}')
     else:
         print(f'上涨准确率: 0/0 = 0.000 (无预测上涨)')
-    
+
+    # 打印置信度区间精确度统计
+    print(f'置信度区间精确度:')
+    for interval in ['0.50-0.80', '0.80-0.90', '0.90-0.93', '0.93-0.96', '0.96-1.00']:
+        correct, total_pred, non_negative = confidence_stats[interval]
+        if total_pred > 0:
+            precision = correct / total_pred
+            non_negative_rate = non_negative / total_pred
+            print(f'  {interval}: 上涨准确={correct}/{total_pred}={precision:.3f}, 非负准确={non_negative}/{total_pred}={non_negative_rate:.3f}')
+        else:
+            print(f'  {interval}: 无预测')
+
     overall_acc = sum(class_correct) / sum(class_total) if sum(class_total) > 0 else 0
-    avg_score = score / total if total > 0 else 0
+    avg_score = score / score_count if score_count > 0 else 0
     
     print(f'总体准确率: {overall_acc:.3f}')
-    print(f'评估得分: {score} / {total} = {avg_score:.3f}')
+    print(f'收益评估 (置信度≥0.8): 参与数={score_count}, 累计收益率={score*100:.2f}%, 平均收益率={avg_score*100:.3f}%')
     print(f'AUC得分: {auc_score:.4f}')
     print(f'测试集损失: {test_loss:.4f}')
     print("=" * 50)

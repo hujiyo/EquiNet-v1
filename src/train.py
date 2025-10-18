@@ -114,12 +114,6 @@ class DynamicWeightedBCE(nn.Module):
             # 标准类别权重计算
             self.positive_weight = torch.tensor(total_count / (num_classes * positive_count))
             self.negative_weight = torch.tensor(total_count / (num_classes * negative_count))
-            
-            # 限制权重范围，避免过度不平衡
-            max_weight = 5.0
-            min_weight = 0.1
-            self.positive_weight = torch.clamp(self.positive_weight, min_weight, max_weight)
-            self.negative_weight = torch.clamp(self.negative_weight, min_weight, max_weight)
         
     def forward(self, inputs, targets):
         """
@@ -144,8 +138,6 @@ class DynamicWeightedBCE(nn.Module):
         else:
             return weighted_loss
 
-
-# 标准位置编码类
 class PositionalEncoding(nn.Module):
     """
     标准的正弦位置编码
@@ -207,7 +199,6 @@ class MultiHeadAttention(nn.Module):
         output = x + self.dropout(attn_output)
         return output
 
-# 标准 Transformer 层（Pre-Norm架构）
 class TransformerLayer(nn.Module):
     """
     标准的 Transformer 层（Pre-Norm架构）
@@ -247,7 +238,6 @@ class TransformerLayer(nn.Module):
         
         return x
 
-# 标准 Transformer 模型（Pre-Norm架构）
 class EnhancedStockTransformer(nn.Module):
     """
     标准 Transformer 模型（Pre-Norm架构），用于股票预测
@@ -303,74 +293,66 @@ class EnhancedStockTransformer(nn.Module):
         
         return output
 
+# 单个文件处理函数（用于多进程）
+def process_single_file(args):
+    """处理单个文件，返回处理后的数据"""
+    file_path, file_name = args
+    try:
+        df = pd.read_excel(file_path, engine='openpyxl')
+        time_column = df['time'].values
+        
+        # 找到2021年的起始位置
+        year_2021_start = len(time_column) - 1
+        for i, time_str in enumerate(time_column):
+            year = int(str(time_str).split('/')[0])
+            if year >= 2021:
+                year_2021_start = i
+                break
+        
+        data = df[['start', 'max', 'min', 'end', 'volume']].values
+        
+        # 标准化
+        mean = np.mean(data, axis=0)
+        std = np.std(data, axis=0)
+        if np.any(std == 0):
+            return None
+        normalized_data = (data - mean) / std
+        
+        stock_info = {
+            'data_length': len(normalized_data),
+            'year_2021_start': year_2021_start,
+            'file_name': file_name,
+            'original_data': data
+        }
+        
+        return (normalized_data, stock_info)
+    except Exception as e:
+        print(f"处理文件 {file_name} 时出错: {e}")
+        return None
+
 # 数据预处理函数
 def load_and_preprocess_data(data_dir=DataConfig.DATA_DIR, test_ratio=DataConfig.TEST_RATIO, seed=DataConfig.RANDOM_SEED):
-    """
-    改进的数据加载和预处理函数
-    确保训练集和测试集完全独立，没有数据泄露
-    使用固定的31个测试文件以确保评估的一致性
-    """
+    """数据加载和预处理，使用多进程并行加载"""
+    from multiprocessing import Pool, cpu_count
+    
     all_files = [f for f in os.listdir(data_dir) if f.endswith('.xlsx')]
-    all_files.sort()  # 确保文件顺序一致
+    all_files.sort()
     
-    # 使用固定的31个测试文件（按文件名排序后的前31个）
     test_size = 31
-    if len(all_files) < test_size:
-        print(f"警告: 可用文件数 ({len(all_files)}) 少于31个，将使用所有文件作为测试集")
-        test_size = len(all_files)
-    
-    test_files = set(all_files[:test_size])  # 固定使用前31个文件作为测试集
+    test_files = set(all_files[:test_size])
     train_files = [f for f in all_files if f not in test_files]
     
-    print(f"训练股票文件: {len(train_files)} 个")
-    print(f"测试股票文件: {len(test_files)} 个 (固定31个文件)")
-    print(f"测试文件列表: {list(test_files)[:5]}...")  # 显示前5个测试文件
+    print(f"训练股票: {len(train_files)} 个, 测试股票: {len(test_files)} 个")
 
     def process_files(file_list):
-        data_list = []
-        stock_info_list = []  # 新增：存储股票信息
+        file_args = [(os.path.join(data_dir, f), f) for f in file_list]
+        num_workers = min(cpu_count(), 8)
         
-        for file in file_list:
-            file_path = os.path.join(data_dir, file)
-            df = pd.read_excel(file_path)
-            try:
-                # 获取时间列用于判断2021年
-                time_column = df['time'].values
-                
-                # 找到2021年的起始位置
-                year_2021_start = None
-                for i, time_str in enumerate(time_column):
-                    year = int(time_str.split('/')[0])
-                    if year >= 2021:
-                        year_2021_start = i
-                        break
-                
-                # 如果没找到2021年，使用最后一个位置
-                if year_2021_start is None:
-                    year_2021_start = len(time_column) - 1
-                
-                data = df[['start', 'max', 'min', 'end', 'volume']].values
-                
-                # 每只股票单独标准化
-                mean = np.mean(data, axis=0)
-                std = np.std(data, axis=0)
-                if np.any(std == 0):
-                    raise ValueError(f"文件 {file} 包含标准差为0的列")
-                normalized_data = (data - mean) / std
-                
-                data_list.append(normalized_data)
-                
-                # 存储股票信息
-                stock_info = {
-                    'data_length': len(normalized_data),
-                    'year_2021_start': year_2021_start,
-                    'file_name': file
-                }
-                stock_info_list.append(stock_info)
-                
-            except Exception as e:
-                print(f"处理文件 {file} 时出错: {e}")
+        with Pool(num_workers) as pool:
+            results = [r for r in pool.map(process_single_file, file_args) if r is not None]
         
+        data_list = [r[0] for r in results]
+        stock_info_list = [r[1] for r in results]
         return data_list, stock_info_list
 
     train_data, train_stock_info = process_files(train_files)
@@ -424,32 +406,35 @@ def generate_single_sample_improved(all_data, stock_info_list, stock_weights):
         total_valid_windows = len(stock_data) - required_length + 1
         
         # 计算2021年前后的窗口数量
-        windows_before_2021 = max(0, year_2021_start - required_length + 1)
-        windows_after_2021 = total_valid_windows - windows_before_2021
+        # 2021年前的窗口：窗口结束位置必须在 required_length 之前
+        windows_before_2021 = max(0, min(year_2021_start, total_valid_windows))
+        windows_after_2021 = max(0, total_valid_windows - windows_before_2021)
         
         if windows_after_2021 > 0 and windows_before_2021 > 0:
             # 有2021年前后的数据，使用0.6概率选择2021年后
             if np.random.random() < 0.6:
-                # 选择2021年后的窗口
+                # 选择2021年后的窗口：从 year_2021_start 到最后一个有效窗口
                 start_index = np.random.randint(year_2021_start, len(stock_data) - required_length + 1)
             else:
-                # 选择2021年前的窗口
-                start_index = np.random.randint(0, year_2021_start)
+                # 选择2021年前的窗口：确保窗口不会超出范围
+                # 最大起始位置是 min(year_2021_start, len(stock_data) - required_length + 1)
+                max_start_before_2021 = min(year_2021_start, len(stock_data) - required_length + 1)
+                start_index = np.random.randint(0, max_start_before_2021)
         else:
             # 只有2021年前或后的数据，随机选择
             start_index = np.random.randint(0, len(stock_data) - required_length + 1)
         
-        input_seq = stock_data[start_index:start_index + context_length]  # 60天历史数据
-        target_seq = stock_data[start_index + context_length:start_index + required_length]  # 未来3天
+        input_seq = stock_data[start_index:start_index + context_length]  # 60天历史数据（标准化）
         
-        # 计算收益率：(未来价格 - 当前价格) / 当前价格
-        start_price = input_seq[-1, 3]  # 当前收盘价（第3列是end收盘价）
-        end_price = target_seq[-1, 3]   # 3天后的收盘价
+        # 使用原始数据计算真实收益率和标签
+        original_data = stock_info['original_data']
+        original_start_price = original_data[start_index + context_length - 1, 3]  # 当前收盘价（原始）
+        original_end_price = original_data[start_index + required_length - 1, 3]   # 3天后收盘价（原始）
         
-        if start_price == 0:  # 避免除零错误
+        if original_start_price == 0:  # 避免除零错误
             continue
             
-        cumulative_return = (end_price - start_price) / start_price
+        cumulative_return = (original_end_price - original_start_price) / original_start_price
         
         # 二分类标签：上涨为1，不上涨为0
         if cumulative_return >= DataConfig.UPRISE_THRESHOLD:      # 涨幅≥阈值%：上涨
@@ -489,7 +474,7 @@ def generate_batch_samples_improved(all_data, stock_info_list, stock_weights, ba
     return np.array(batch_inputs), np.array(batch_targets)
 
 # 创建固定的评估数据集
-def create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPLES, seed=DataConfig.RANDOM_SEED):
+def create_fixed_evaluation_dataset(test_data, test_stock_info, num_samples=DataConfig.EVAL_SAMPLES, seed=DataConfig.RANDOM_SEED):
     """
     创建固定的评估数据集，确保每次评估使用相同的样本
     这样可以准确衡量模型的进步情况
@@ -516,19 +501,22 @@ def create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPL
     for stock_idx, stock_data in enumerate(test_data):
         if len(stock_data) < required_length:
             continue
+        
+        # 获取该股票的原始数据（用于计算真实收益率）
+        original_data = test_stock_info[stock_idx]['original_data']
             
         # 为每只股票生成所有可能的时间窗口样本
         for start_idx in range(len(stock_data) - required_length + 1):
-            input_seq = stock_data[start_idx:start_idx + context_length]
-            target_seq = stock_data[start_idx + context_length:start_idx + required_length]
+            input_seq = stock_data[start_idx:start_idx + context_length]  # 标准化数据用于模型输入
             
-            start_price = input_seq[-1, 3]  # 当前收盘价
-            end_price = target_seq[-1, 3]   # 3天后收盘价
+            # 使用原始数据计算真实收益率
+            original_start_price = original_data[start_idx + context_length - 1, 3]  # 当前收盘价（原始）
+            original_end_price = original_data[start_idx + required_length - 1, 3]   # 3天后收盘价（原始）
             
-            if start_price == 0:
+            if original_start_price == 0:
                 continue
                 
-            cumulative_return = (end_price - start_price) / start_price
+            cumulative_return = (original_end_price - original_start_price) / original_start_price
             
             # 二分类标签：上涨为1，不上涨为0
             if cumulative_return >= DataConfig.UPRISE_THRESHOLD:
@@ -574,16 +562,27 @@ def create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPL
     for cls, count in zip(unique, counts):
         print(f"  {class_names[int(cls)]}: {count} 个样本 ({count/len(eval_targets)*100:.1f}%)")
     
+    # 打印收益率统计
+    print(f"\n真实收益率统计:")
+    print(f"  最小值: {np.min(eval_cumulative_returns)*100:.2f}%")
+    print(f"  最大值: {np.max(eval_cumulative_returns)*100:.2f}%")
+    print(f"  平均值: {np.mean(eval_cumulative_returns)*100:.2f}%")
+    print(f"  中位数: {np.median(eval_cumulative_returns)*100:.2f}%")
+    print(f"  ≥0%样本: {np.sum(eval_cumulative_returns >= 0)} ({np.sum(eval_cumulative_returns >= 0)/len(eval_cumulative_returns)*100:.1f}%)")
+    print(f"  ≥3%样本: {np.sum(eval_cumulative_returns >= 0.03)} ({np.sum(eval_cumulative_returns >= 0.03)/len(eval_cumulative_returns)*100:.1f}%)")
+    print(f"  ≥6%样本: {np.sum(eval_cumulative_returns >= 0.06)} ({np.sum(eval_cumulative_returns >= 0.06)/len(eval_cumulative_returns)*100:.1f}%)")
+    
     return eval_inputs, eval_targets, eval_cumulative_returns
 
 # 批量评估函数
 def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_returns, device, batch_size=DataConfig.EVAL_BATCH_SIZE):
     """
     使用批处理进行快速评估（二分类）
-    返回: (score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score)
+    返回: (score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, score_count)
     """
     model.eval()
     score = 0
+    score_count = 0  # 新增：参与评分的预测数量
     total = 0
     class_correct = [0, 0]  # [不上涨正确数, 上涨正确数]
     class_total = [0, 0]    # [不上涨总数, 上涨总数]
@@ -596,6 +595,15 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
     # 新增：用于AUC计算的列表
     all_probabilities = []
     all_targets = []
+    
+    # 新增：置信度区间统计 {区间名称: [预测上涨且正确数, 预测上涨总数, 预测上涨且实际涨幅≥0%数]}
+    confidence_stats = {
+        '0.50-0.80': [0, 0, 0],
+        '0.80-0.90': [0, 0, 0],
+        '0.90-0.93': [0, 0, 0],
+        '0.93-0.96': [0, 0, 0],
+        '0.96-1.00': [0, 0, 0]
+    }
     
     num_samples = len(eval_inputs)
     num_batches = (num_samples + batch_size - 1) // batch_size
@@ -625,6 +633,7 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
                 target = int(batch_targets[j])
                 prediction = batch_predictions[j]
                 actual_return = batch_returns[j]  # 获取实际涨跌幅
+                probability = batch_probabilities[j]  # 获取预测概率
                 
                 class_total[target] += 1
                 total += 1
@@ -636,17 +645,44 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
                         pred_positive_correct += 1
                     if actual_return >= 0:  # 预测上涨且实际涨幅≥0%
                         pred_non_negative += 1
+                    
+                    # 统计不同置信度区间的精确度
+                    if 0.5 <= probability < 0.8:
+                        confidence_stats['0.50-0.80'][1] += 1
+                        if target == 1:
+                            confidence_stats['0.50-0.80'][0] += 1
+                        if actual_return >= 0:
+                            confidence_stats['0.50-0.80'][2] += 1
+                    elif 0.8 <= probability < 0.9:
+                        confidence_stats['0.80-0.90'][1] += 1
+                        if target == 1:
+                            confidence_stats['0.80-0.90'][0] += 1
+                        if actual_return >= 0:
+                            confidence_stats['0.80-0.90'][2] += 1
+                    elif 0.9 <= probability < 0.93:
+                        confidence_stats['0.90-0.93'][1] += 1
+                        if target == 1:
+                            confidence_stats['0.90-0.93'][0] += 1
+                        if actual_return >= 0:
+                            confidence_stats['0.90-0.93'][2] += 1
+                    elif 0.93 <= probability < 0.96:
+                        confidence_stats['0.93-0.96'][1] += 1
+                        if target == 1:
+                            confidence_stats['0.93-0.96'][0] += 1
+                        if actual_return >= 0:
+                            confidence_stats['0.93-0.96'][2] += 1
+                    elif 0.96 <= probability <= 1.0:
+                        confidence_stats['0.96-1.00'][1] += 1
+                        if target == 1:
+                            confidence_stats['0.96-1.00'][0] += 1
+                        if actual_return >= 0:
+                            confidence_stats['0.96-1.00'][2] += 1
                 
-                # 应用新的评分规则
-                if prediction == 1:  # 只有预测上涨时才计算分数
-                    if actual_return >= DataConfig.UPRISE_THRESHOLD:  # 实际上涨≥阈值%
-                        score += EvaluationConfig.UPRISE_CORRECT_HIGH_SCORE
-                    elif actual_return >= 0:  # 实际涨0-阈值%
-                        score += EvaluationConfig.UPRISE_CORRECT_LOW_SCORE
-                    elif actual_return >= -0.02:  # 实际下跌<2%
-                        score += EvaluationConfig.UPRISE_FALSE_SMALL_PENALTY
-                    else:  # 实际下跌≥2%
-                        score += EvaluationConfig.UPRISE_FALSE_LARGE_PENALTY
+                # 应用新的评分规则：只有置信度≥0.8的预测才参与评分
+                # 直接使用真实涨跌幅作为得分（模拟实盘收益）
+                if prediction == 1 and probability >= 0.8:  # 只有预测上涨且置信度≥0.8时才计算分数
+                    score_count += 1  # 增加参与评分的数量
+                    score += actual_return  # 直接累加真实涨跌幅（正为盈利，负为亏损）
                 
                 # 统计预测正确性（用于显示准确率，不影响评分）
                 if prediction == target:
@@ -659,7 +695,7 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
         # 如果所有标签都是同一类，AUC无法计算
         auc_score = 0.5  # 随机分类器的AUC
     
-    return score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score
+    return score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, score_count
 
 def calculate_test_loss(model, eval_inputs, eval_targets, criterion, device, batch_size=DataConfig.EVAL_BATCH_SIZE):
     """
@@ -781,7 +817,7 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
         torch.cuda.manual_seed_all(DataConfig.RANDOM_SEED)
     
     # 创建固定的评估数据集（训练开始前创建一次）
-    eval_inputs, eval_targets, eval_cumulative_returns = create_fixed_evaluation_dataset(test_data, num_samples=DataConfig.EVAL_SAMPLES)
+    eval_inputs, eval_targets, eval_cumulative_returns = create_fixed_evaluation_dataset(test_data, test_stock_info, num_samples=DataConfig.EVAL_SAMPLES)
     
     # 使用动态加权BCE损失函数，根据每轮训练数据的正负样本比例动态调整权重
     criterion = DynamicWeightedBCE()
@@ -856,7 +892,6 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
         negative_ratio = negative_count / total_count if total_count > 0 else 0
         
         print(f'  本轮数据分布: 正样本={positive_count}({positive_ratio:.1%}), 负样本={negative_count}({negative_ratio:.1%})')
-        print(f'  动态权重: 正样本权重={criterion.positive_weight.item():.3f}, 负样本权重={criterion.negative_weight.item():.3f}')
         
         # 显示预热进度和调度器信息
         if warmup_scheduler.is_warmup_phase():
@@ -919,7 +954,9 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
             
             # 自适应调度器根据性能更新（在主调度器之后）
             old_lr = optimizer.param_groups[0]['lr']
-            adaptive_scheduler.step(score)
+            # 注意：这里的score变量还未定义，需要先计算评估结果
+            # 暂时使用旧的best_score，稍后会被正确的avg_score更新
+            adaptive_scheduler.step(best_score)
             new_lr = optimizer.param_groups[0]['lr']
             
             # 如果学习率被自适应调度器降低了，打印信息
@@ -927,15 +964,15 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
                 print(f'  🔽 自适应调度器触发: 学习率从 {old_lr:.2e} 降低到 {new_lr:.2e}')
         
         # 固定评估集评估
-        score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score = evaluate_model_batch(
+        score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, score_count = evaluate_model_batch(
             model, eval_inputs, eval_targets, eval_cumulative_returns, device, batch_size=DataConfig.EVAL_BATCH_SIZE
         )
         
         # 计算测试集损失
         test_loss = calculate_test_loss(model, eval_inputs, eval_targets, criterion, device, batch_size=DataConfig.EVAL_BATCH_SIZE)
         
-        # 随机挑选10组样本打印模型输出值
-        print_sample_predictions(model, eval_inputs, eval_targets, device, num_samples=10, epoch=epoch+1)
+        # 随机挑选5组样本打印模型输出值
+        print_sample_predictions(model, eval_inputs, eval_targets, device, num_samples=5, epoch=epoch+1)
         
         # 打印详细结果
         class_names = ['不上涨', '上涨']
@@ -954,19 +991,42 @@ def train_model(model, train_data, test_data, train_stock_info, train_weights, e
         else:
             print(f'  上涨准确率: 0/0 = 0.000 (无预测上涨)')
         
+        # 打印置信度区间的精确度统计
+        print(f'  置信度区间精确度:')
+        for interval in ['0.50-0.80', '0.80-0.90', '0.90-0.93', '0.93-0.96', '0.96-1.00']:
+            correct, total_pred, non_negative = confidence_stats[interval]
+            if total_pred > 0:
+                precision = correct / total_pred
+                non_negative_rate = non_negative / total_pred
+                print(f'    {interval}: 上涨准确={correct}/{total_pred}={precision:.3f}, 非负准确={non_negative}/{total_pred}={non_negative_rate:.3f}')
+            else:
+                print(f'    {interval}: 无预测')
+        
         overall_acc = sum(class_correct) / sum(class_total) if sum(class_total) > 0 else 0
-        avg_score = score / total if total > 0 else 0
+        avg_loss = total_loss / batches_per_epoch
+        
+        # 计算平均得分（只有置信度≥0.8的预测参与评分）
+        # 现在score是真实涨跌幅的累加，avg_score就是平均收益率
+        avg_score = score / score_count if score_count > 0 else 0
+        
+        # 计算综合得分：总收益率（更直观）
+        # total_return = avg_score * score_count 就是总的累计收益率
+        import math
+        composite_score = score  # 直接使用总收益率作为综合得分
         
         print(f'  总体准确率: {overall_acc:.3f}')
-        print(f'  评估得分: {score} / {total} = {avg_score:.3f}')
+        print(f'  收益评估 (置信度≥0.8): 参与数={score_count}, 累计收益率={score*100:.2f}%, 平均收益率={avg_score*100:.3f}%')
         print(f'  AUC得分: {auc_score:.4f}')
-        print(f'  测试集损失: {test_loss:.4f}')
+        print(f'  训练集损失: {avg_loss:.4f}, 测试集损失: {test_loss:.4f}')
         
-        # 保存最佳模型
-        if score > best_score:
-            best_score = score
+        # 保存最佳模型（使用总收益率作为比较标准，但要求最低参与数≥20）
+        MIN_SCORE_COUNT = 20  # 最低参与数要求
+        if score_count >= MIN_SCORE_COUNT and composite_score > best_score:
+            best_score = composite_score
             torch.save(model.state_dict(), ModelSaveConfig.get_best_model_path())
-            print(f'  ✓ 发现更好的模型！得分提升到: {score}')
+            print(f'  ✓ 发现更好的模型！累计收益率提升到: {composite_score*100:.2f}% (参与数={score_count}, 平均={avg_score*100:.3f}%)')
+        elif score_count < MIN_SCORE_COUNT:
+            print(f'  ⚠ 参与数不足({score_count}<{MIN_SCORE_COUNT})，暂不更新最佳模型')
         
         print("-" * 50)
 

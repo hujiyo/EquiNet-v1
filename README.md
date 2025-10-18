@@ -96,16 +96,21 @@ pip install torch pandas numpy tqdm
    git clone https://gitee.com/hujiyo/EquiNet.git
    ```
 
-2. **运行训练脚本**
+2. **下载数据集**
+
+   数据集链接：https://huggingface.co/datasets/Mhuixs/EquiNet-v1-319_420
+   下载后将数据集放在`./data`目录下。每个`.xlsx`文件对应一只股票，包含420天数据，共319只股票。
+
+3. **运行训练脚本**
    ```bash
    python src/train.py
    ```
 
-3. **模型评估**
+4. **模型评估**
    - 训练完成后，模型权重保存在`./out/EnhancedEquiNet_{d_model}.pth`。
-   - 可使用`src/test_model.py`对模型进行评估：
+   - 可使用`src/run.py`对模型进行评估：
      ```bash
-     python src/test_model.py
+     python src/run.py
      ```
 
 ### 训练结果示例（最新版本可能略微不同 &&参数需要自己去调）
@@ -142,6 +147,7 @@ Epoch 59/60, LR: 0.000001 (正常训练)
 ### 常规训练流程
 1. **准备数据**
    - 将319个`.xlsx`股票数据文件放入`./data`目录下。
+   数据集链接：https://huggingface.co/datasets/Mhuixs/EquiNet-v1-319_420
 
 2. **运行训练脚本**
    ```bash
@@ -152,9 +158,9 @@ Epoch 59/60, LR: 0.000001 (正常训练)
 
 3. **模型评估**
    - 训练完成后，模型权重保存在`./out/EnhancedEquiNet_{d_model}.pth`。
-   - 可使用`src/test_model.py`对模型进行评估：
+   - 可使用`src/run.py`对模型进行评估：
      ```bash
-     python src/test_model.py
+     python src/run.py
      ```
 
 ## 配置文件使用说明
@@ -238,9 +244,11 @@ python src/train.py
 
 #### 5. 测试模型
 ```bash
-python src/test_model.py
+python src/run.py
 ```
 测试脚本也会使用配置文件中的参数。
+使用模型对./src/predict/下的股票数据进行预测，
+预测结果会保存在./src/predict/result.xlsx文件中。
 
 ### 注意事项
 
@@ -253,6 +261,7 @@ python src/test_model.py
 
 ## 项目修改LOG
 
+- 2025.10.18:数据集统一放到huggingface上供大家下载。修复索引越界错误，修复动态权重计算错误。改积分评分制为实际涨跌评分制。
 - 2025.10.15:增加学习率预热和余弦退火调度机制，残差连接改为Pre-Norm架构，调整了部分参数。进一步提升了模型训练时的稳定性。
 - 2025.9.16:**重要修复** - 修正了原来错误的权重平衡方法,模型的预测能力各项指标普遍上涨5%-15%。取消专业头机制，优化训练时数据采样流程，改为每批次提前批量抽取数据，训练效率提升50%以上。
 - 2025.8.1: **重大更新** - 重构采用二分类方案，专注于预测股票是否会上涨，输出0-1之间的概率值，更符合实际交易需求。使用固定的31个测试文件和评估样本，确保评估的一致性和可重复性。模型准确率达到58%，接近60%目标。在预测为上涨的股票集中，股票上涨2%的概率高达49%，远超随机平均水平（34%-42%）
@@ -294,6 +303,8 @@ python src/test_model.py
 ```
 
 ## 最新公告
+
+数据集不再上传到github,而是统一放到huggingface上方便大家下载
 
 该版本为EquiNet的第一个正式大版本（v1.x.x）
 

@@ -12,25 +12,25 @@ class ModelConfig:
     INPUT_DIM = 5                    # 输入特征维度数（OHLCV）
     D_MODEL = 64                     # 模型维度（从128降到48，实验证明性能更好）
     NHEAD = 4                        # 注意力头数（从4降到3，匹配更小的模型）
-    NUM_LAYERS = 4                   # Transformer层数
+    NUM_LAYERS = 5                   # Transformer层数
     OUTPUT_DIM = 1                   # 输出维度（上涨概率，0-1之间）
     MAX_SEQ_LEN = 60                 # 最大序列长度
 
     # 注意力机制参数（为小模型调整）
-    DROPOUT_RATE = 0.2               # Dropout比率（从0.3降到0.2，小模型需要更少正则化）
-    ATTENTION_DROPOUT = 0.1          # 注意力Dropout比率（从0.2降到0.1）
+    DROPOUT_RATE = 0                 # Dropout比率（从0.3降到0.2，小模型需要更少正则化）
+    ATTENTION_DROPOUT = 0            # 注意力Dropout比率（从0.2降到0.1）
 
 # ==================== 训练参数 ====================
 class TrainingConfig:
     """训练相关参数"""
 
     # 基础训练参数（优化训练策略）
-    EPOCHS = 30                     # 训练轮数（增加轮数以充分训练小模型）
+    EPOCHS = 60                     # 训练轮数（增加轮数以充分训练小模型）
     LEARNING_RATE = 0.001            # 初始学习率（提高学习率）
 
     # 训练批处理
-    BATCH_SIZE = 128                 # GPU每次并行训练的样本数（增加批大小）
-    BATCHES_PER_EPOCH = 40           # 每轮训练的批次数（减少批次数）
+    BATCH_SIZE = 2048                 # GPU每次并行训练的样本数（增加批大小）
+    BATCHES_PER_EPOCH = 20           # 每轮训练的批次数（减少批次数）
 
     # 优化器参数
     WEIGHT_DECAY = 1e-5              # 权重衰减
@@ -75,7 +75,7 @@ class DataConfig:
     UPRISE_THRESHOLD = 0.06          # 上涨阈值（6%，超过6%算上涨）
 
     # 评估参数
-    EVAL_SAMPLES = 200               # 评估样本数量
+    EVAL_SAMPLES = 1000               # 评估样本数量
     EVAL_BATCH_SIZE = 50             # 评估批处理大小
 
 # ==================== 评估参数 ====================
