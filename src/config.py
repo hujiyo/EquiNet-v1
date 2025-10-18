@@ -10,9 +10,9 @@ class ModelConfig:
     """模型架构相关参数"""
     # 基础模型参数
     INPUT_DIM = 5                    # 输入特征维度数（OHLCV）
-    D_MODEL = 64                     # 模型维度（从128降到48，实验证明性能更好）
+    D_MODEL = 128                     # 模型维度（从128降到48，实验证明性能更好）
     NHEAD = 4                        # 注意力头数（从4降到3，匹配更小的模型）
-    NUM_LAYERS = 5                   # Transformer层数
+    NUM_LAYERS = 3                   # Transformer层数
     OUTPUT_DIM = 1                   # 输出维度（上涨概率，0-1之间）
     MAX_SEQ_LEN = 60                 # 最大序列长度
 
@@ -29,7 +29,7 @@ class TrainingConfig:
     LEARNING_RATE = 0.001            # 初始学习率（提高学习率）
 
     # 训练批处理
-    BATCH_SIZE = 2048                 # GPU每次并行训练的样本数（增加批大小）
+    BATCH_SIZE = 32                 # GPU每次并行训练的样本数（增加批大小）
     BATCHES_PER_EPOCH = 20           # 每轮训练的批次数（减少批次数）
 
     # 优化器参数
