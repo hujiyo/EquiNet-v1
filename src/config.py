@@ -5,31 +5,68 @@ EquiNet 模型配置文件
 
 import torch
 
+# ==================== 数据参数 ====================
+class DataConfig:
+    """数据相关参数"""
+    # 数据路径
+    DATA_DIR = './data'              # 数据目录
+    OUTPUT_DIR = './out'             # 输出目录
+
+    # 数据分割参数（按时间划分）
+    TEST_DAYS = 80                   # 测试集天数（每只股票的最近N天作为测试集）
+    RANDOM_SEED = 42                 # 随机种子
+    
+    # 样本生成参数
+    CONTEXT_LENGTH = 30              # 历史数据长度（这是核心参数，其他地方应引用这个值）
+    FUTURE_DAYS = 3                  # 未来预测天数
+    REQUIRED_LENGTH = CONTEXT_LENGTH + FUTURE_DAYS  # 总需求长度（上下文 + 未来天数）
+
+    # 上涨阈值
+    UPRISE_THRESHOLD = 0.10          # 上涨阈值（10%）
+    
+    # 旧的软标签机制：基于未来累计涨幅大小
+    # 涨幅≥10% → 标签1.0
+    # 涨幅5%-10% → 标签0.6
+    # 涨幅0%-5% → 标签0.3
+    # 涨幅<0% → 标签0.0
+
+    # 评估参数
+    EVAL_SAMPLES = 2000               # 评估样本数量
+    EVAL_BATCH_SIZE = 100             # 评估批处理大小
+    
+    # 模型保存条件
+    MIN_SCORE_COUNT = 20              # 最低参与预测数要求
+    MIN_AUC = 0.55                    # 最低AUC要求（按时间划分后的真实性能基线）
+
 # ==================== 模型架构参数 ====================
 class ModelConfig:
     """模型架构相关参数"""
     # 基础模型参数
     INPUT_DIM = 5                    # 输入特征维度数（OHLCV）
-    D_MODEL = 128                     # 模型维度（从128降到48，实验证明性能更好）
+    PRICE_DIM = 4                    # 价格特征维度（OHLC）
+    VOLUME_DIM = 1                   # 成交量特征维度
+    D_MODEL = 84                     # 模型维度（价格48维 + 成交量16维）
+    PRICE_EMBED_DIM = 63             # 价格Embedding维度（75%）
+    VOLUME_EMBED_DIM = 21            # 成交量Embedding维度（25%）
     NHEAD = 4                        # 注意力头数（从4降到3，匹配更小的模型）
-    NUM_LAYERS = 3                   # Transformer层数
+    NUM_LAYERS = 6                   # Transformer层数
     OUTPUT_DIM = 1                   # 输出维度（上涨概率，0-1之间）
-    MAX_SEQ_LEN = 60                 # 最大序列长度
+    MAX_SEQ_LEN = DataConfig.CONTEXT_LENGTH  # 最大序列长度（直接引用CONTEXT_LENGTH，确保一致性）
 
     # 注意力机制参数（为小模型调整）
-    DROPOUT_RATE = 0                 # Dropout比率（从0.3降到0.2，小模型需要更少正则化）
-    ATTENTION_DROPOUT = 0            # 注意力Dropout比率（从0.2降到0.1）
+    DROPOUT_RATE = 0                 # Dropout比率设置为0降低欠拟合
+    ATTENTION_DROPOUT = 0            # 注意力Dropout比率设置为0降低欠拟合
 
 # ==================== 训练参数 ====================
 class TrainingConfig:
     """训练相关参数"""
 
     # 基础训练参数（优化训练策略）
-    EPOCHS = 60                     # 训练轮数（增加轮数以充分训练小模型）
+    EPOCHS = 40                     # 训练轮数（增加轮数以充分训练小模型）
     LEARNING_RATE = 0.001            # 初始学习率（提高学习率）
 
     # 训练批处理
-    BATCH_SIZE = 32                 # GPU每次并行训练的样本数（增加批大小）
+    BATCH_SIZE = 2048                 # GPU每次并行训练的样本数（增加批大小）
     BATCHES_PER_EPOCH = 20           # 每轮训练的批次数（减少批次数）
 
     # 优化器参数
@@ -42,51 +79,12 @@ class TrainingConfig:
     
     # 余弦退火调度器参数
     USE_COSINE_ANNEALING = True      # 是否使用余弦退火调度器
-    COSINE_T_MAX = EPOCHS - 5        # 余弦退火周期（总轮数-预热轮数）
-    COSINE_ETA_MIN = 1e-6            # 余弦退火最小学习率
-    
-    # 自适应学习率参数
-    PATIENCE = 3                     # 性能不提升的容忍轮数
-    LR_REDUCE_FACTOR = 0.7           # 学习率衰减因子
-    MIN_LR = 1e-7                    # 最小学习率
+    COSINE_T_MAX = 30                # 余弦退火周期（30轮完成衰减，更快收敛）
+    COSINE_ETA_MIN = 1e-5            # 余弦退火最小学习率（提高到1e-5，避免学习率过小）
     
     # 学习率预热参数
     WARMUP_EPOCHS = 5                # 预热轮数（前5轮逐步达到最高学习率）
     WARMUP_START_LR = 1e-4           # 预热起始学习率（提高起始值，减少过于保守的预热）
-
-# ==================== 数据参数 ====================
-class DataConfig:
-    """数据相关参数"""
-
-    # 数据路径
-    DATA_DIR = './data'              # 数据目录
-    OUTPUT_DIR = './out'             # 输出目录
-
-    # 数据分割参数
-    TEST_RATIO = 0.1                 # 测试集比例
-    RANDOM_SEED = 42                 # 随机种子
-
-    # 样本生成参数
-    CONTEXT_LENGTH = 60              # 历史数据长度
-    FUTURE_DAYS = 3                  # 未来预测天数
-    REQUIRED_LENGTH = CONTEXT_LENGTH + FUTURE_DAYS  # 总需求长度
-
-    # 二分类阈值（上涨/不上涨）
-    UPRISE_THRESHOLD = 0.06          # 上涨阈值（6%，超过6%算上涨）
-
-    # 评估参数
-    EVAL_SAMPLES = 1000               # 评估样本数量
-    EVAL_BATCH_SIZE = 50             # 评估批处理大小
-
-# ==================== 评估参数 ====================
-class EvaluationConfig:
-    """评估相关参数"""
-    # 新评分规则（基于预测上涨和实际涨跌幅）
-    UPRISE_CORRECT_HIGH_SCORE = 1      # 预测上涨且实际上涨≥阈值%
-    UPRISE_CORRECT_LOW_SCORE = 0.5      # 预测上涨且实际涨0-阈值%
-    UPRISE_FALSE_SMALL_PENALTY = -1     # 预测上涨但实际下跌<2%
-    UPRISE_FALSE_LARGE_PENALTY = -2     # 预测上涨但实际下跌≥2%
-    # 其余情况（预测不上涨）：不改变分数
 
 # ==================== 设备配置 ====================
 class DeviceConfig:
@@ -103,8 +101,14 @@ class DeviceConfig:
         device = DeviceConfig.get_device()
         if device.type == "cuda":
             print(f"使用 GPU 进行训练: {torch.cuda.get_device_name()}")
+            # 检查BF16支持
+            if torch.cuda.is_bf16_supported():
+                print("✓ GPU 支持 BF16 加速训练")
+            else:
+                print("⚠ GPU 不支持 BF16，训练可能较慢或出错（建议使用RTX 30系及以上显卡）")
         else:
             print("CUDA 不可用，将使用 CPU 进行训练，训练速度可能较慢。")
+            print("⚠ CPU 模式下 BF16 性能可能不如 FP32")
         return device
 
 # ==================== 模型保存配置 ====================
@@ -138,7 +142,7 @@ def print_config_summary():
     print(f"  注意力头数: {ModelConfig.NHEAD}")
     print(f"  层数: {ModelConfig.NUM_LAYERS}")
     print(f"  输出维度: {ModelConfig.OUTPUT_DIM}")
-    print(f"  序列长度: {ModelConfig.MAX_SEQ_LEN}")
+    print(f"  序列长度: {DataConfig.CONTEXT_LENGTH} (由CONTEXT_LENGTH统一控制)")
 
     print(f"\n训练参数:")
     print(f"  训练轮数: {TrainingConfig.EPOCHS}")
@@ -157,18 +161,24 @@ def print_config_summary():
         print(f"  调度策略: 阶梯衰减")
         print(f"  衰减步长: {TrainingConfig.SCHEDULER_STEP_SIZE}轮")
         print(f"  衰减因子: {TrainingConfig.SCHEDULER_GAMMA}")
-    print(f"  自适应调整: 容忍{TrainingConfig.PATIENCE}轮, 衰减因子{TrainingConfig.LR_REDUCE_FACTOR}")
-    print(f"  最小学习率: {TrainingConfig.MIN_LR}")
 
     print(f"\n数据参数:")
     print(f"  数据目录: {DataConfig.DATA_DIR}")
-    print(f"  测试集比例: {DataConfig.TEST_RATIO}")
     print(f"  上下文长度: {DataConfig.CONTEXT_LENGTH}")
-    print(f"  未来天数: {DataConfig.FUTURE_DAYS}")
+    print(f"  上涨阈值: {DataConfig.UPRISE_THRESHOLD*100}%")
+    print(f"\n标签机制: 涨幅型软标签（基于未来累计涨幅）")
+    print(f"  涨幅≥10% → 标签1.0")
+    print(f"  涨幅5%-10% → 标签0.6")
+    print(f"  涨幅0%-5% → 标签0.3")
+    print(f"  涨幅<0% → 标签0.0")
 
     print(f"\n评估参数:")
     print(f"  评估样本数: {DataConfig.EVAL_SAMPLES}")
     print(f"  评估批处理大小: {DataConfig.EVAL_BATCH_SIZE}")
+    
+    print(f"\n模型保存条件:")
+    print(f"  最低参与预测数: {DataConfig.MIN_SCORE_COUNT}")
+    print(f"  最低AUC要求: {DataConfig.MIN_AUC}")
 
     print("=" * 50)
 

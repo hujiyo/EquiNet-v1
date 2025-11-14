@@ -5,7 +5,7 @@ from train import (EnhancedStockTransformer, load_and_preprocess_data,
                    evaluate_model_batch, create_fixed_evaluation_dataset, 
                    calculate_test_loss, DynamicWeightedBCE, 
                    calculate_stock_weights)
-from config import (ModelConfig, DataConfig, EvaluationConfig, 
+from config import (ModelConfig, DataConfig, 
                    DeviceConfig, ModelSaveConfig)
 
 if __name__ == "__main__":
@@ -15,11 +15,11 @@ if __name__ == "__main__":
     device = DeviceConfig.get_device()
     print(f"使用设备: {device}")
 
-    # 加载数据（注意：load_and_preprocess_data 返回4个值）
+    # 加载数据（注意：load_and_preprocess_data 返回2个值，现在不做全局标准化）
     print("\n正在加载数据...")
-    train_data, test_data, train_stock_info, test_stock_info = load_and_preprocess_data()
-    print(f"训练数据: {len(train_data)} 只股票")
-    print(f"测试数据: {len(test_data)} 只股票")
+    train_stock_info, test_stock_info = load_and_preprocess_data()
+    print(f"训练数据: {len(train_stock_info)} 只股票")
+    print(f"测试数据: {len(test_stock_info)} 只股票")
 
     # 创建模型
     print("\n正在创建模型...")
@@ -32,6 +32,9 @@ if __name__ == "__main__":
         max_seq_len=ModelConfig.MAX_SEQ_LEN
     ).to(device)
     
+    # 转换为BF16精度，与训练时保持一致
+    model = model.to(dtype=torch.bfloat16)
+    
     # 打印模型参数数量
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -43,10 +46,10 @@ if __name__ == "__main__":
     model.load_state_dict(torch.load(ModelSaveConfig.get_best_model_path(), map_location=device))
     print("模型加载成功！")
 
-    # 创建固定评估数据集（注意：create_fixed_evaluation_dataset 返回3个值）
+    # 创建固定评估数据集（注意：create_fixed_evaluation_dataset 返回3个值，使用滚动窗口标准化）
     print("\n正在创建评估数据集...")
     eval_inputs, eval_targets, eval_cumulative_returns = create_fixed_evaluation_dataset(
-        test_data, test_stock_info, num_samples=DataConfig.EVAL_SAMPLES
+        test_stock_info, num_samples=DataConfig.EVAL_SAMPLES
     )
     
     # 创建损失函数（使用 train.py 中的 DynamicWeightedBCE）
@@ -99,7 +102,7 @@ if __name__ == "__main__":
     avg_score = score / score_count if score_count > 0 else 0
     
     print(f'总体准确率: {overall_acc:.3f}')
-    print(f'收益评估 (置信度≥0.8): 参与数={score_count}, 累计收益率={score*100:.2f}%, 平均收益率={avg_score*100:.3f}%')
+    print(f'收益评估 (置信度≥0.9): 参与数={score_count}, 累计收益率={score*100:.2f}%, 平均收益率={avg_score*100:.3f}%')
     print(f'AUC得分: {auc_score:.4f}')
     print(f'测试集损失: {test_loss:.4f}')
     print("=" * 50)
