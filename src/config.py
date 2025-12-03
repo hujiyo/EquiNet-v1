@@ -17,18 +17,12 @@ class DataConfig:
     RANDOM_SEED = 42                 # 随机种子
     
     # 样本生成参数
-    CONTEXT_LENGTH = 30              # 历史数据长度（这是核心参数，其他地方应引用这个值）
+    CONTEXT_LENGTH = 60              # 历史数据长度（这是核心参数，其他地方应引用这个值）
     FUTURE_DAYS = 3                  # 未来预测天数
     REQUIRED_LENGTH = CONTEXT_LENGTH + FUTURE_DAYS  # 总需求长度（上下文 + 未来天数）
 
-    # 上涨阈值
-    UPRISE_THRESHOLD = 0.10          # 上涨阈值（10%）
-    
-    # 旧的软标签机制：基于未来累计涨幅大小
-    # 涨幅≥10% → 标签1.0
-    # 涨幅5%-10% → 标签0.6
-    # 涨幅0%-5% → 标签0.3
-    # 涨幅<0% → 标签0.0
+    # 上涨阈值（二分类）
+    UPRISE_THRESHOLD = 0.08          # 上涨阈值（8%，涨幅≥8%视为上涨）
 
     # 评估参数
     EVAL_SAMPLES = 2000               # 评估样本数量
@@ -66,7 +60,7 @@ class TrainingConfig:
     LEARNING_RATE = 0.001            # 初始学习率（提高学习率）
 
     # 训练批处理
-    BATCH_SIZE = 2048                 # GPU每次并行训练的样本数（增加批大小）
+    BATCH_SIZE = 4096                 # GPU每次并行训练的样本数（增加批大小）
     BATCHES_PER_EPOCH = 20           # 每轮训练的批次数（减少批次数）
 
     # 优化器参数
@@ -166,11 +160,9 @@ def print_config_summary():
     print(f"  数据目录: {DataConfig.DATA_DIR}")
     print(f"  上下文长度: {DataConfig.CONTEXT_LENGTH}")
     print(f"  上涨阈值: {DataConfig.UPRISE_THRESHOLD*100}%")
-    print(f"\n标签机制: 涨幅型软标签（基于未来累计涨幅）")
-    print(f"  涨幅≥10% → 标签1.0")
-    print(f"  涨幅5%-10% → 标签0.6")
-    print(f"  涨幅0%-5% → 标签0.3")
-    print(f"  涨幅<0% → 标签0.0")
+    print(f"\n标签机制: 二分类（{DataConfig.UPRISE_THRESHOLD*100:.0f}%为阈值）")
+    print(f"  涨幅≥{DataConfig.UPRISE_THRESHOLD*100:.0f}% → 标签1.0 (上涨)")
+    print(f"  涨幅<{DataConfig.UPRISE_THRESHOLD*100:.0f}% → 标签0.0 (不上涨)")
 
     print(f"\n评估参数:")
     print(f"  评估样本数: {DataConfig.EVAL_SAMPLES}")

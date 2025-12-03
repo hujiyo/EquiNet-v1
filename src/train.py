@@ -96,44 +96,35 @@ class DynamicWeightedBCE(nn.Module):
         
     def update_weights(self, targets):
         """
-        按标签桶动态分配权重，让每个标签对总损失贡献相同
-        targets: [batch_size] 标签 (1.0/0.6/0.3/0.0)
+        二分类动态权重：根据正负样本比例动态调整
+        targets: [batch_size] 标签 (1.0/0.0)
         """
         if isinstance(targets, torch.Tensor):
             # BF16需要先转为FP32再转numpy
             targets = targets.float().cpu().numpy()
         
-        # 统计各标签桶的样本数量
-        count_1_0 = np.sum(targets >= 0.9)           # 1.0标签
-        count_0_6 = np.sum((targets >= 0.55) & (targets < 0.9))  # 0.6标签
-        count_0_3 = np.sum((targets >= 0.15) & (targets < 0.55)) # 0.3标签
-        count_0_0 = np.sum(targets < 0.15)           # 0.0标签
+        # 统计正负样本数量
+        count_positive = np.sum(targets >= 0.5)  # 上涨样本（≥5%）
+        count_negative = np.sum(targets < 0.5)   # 不上涨样本（<5%）
         
-        total_negative = count_0_6 + count_0_3 + count_0_0
-        
-        if count_1_0 > 0 and total_negative > 0:
-            # 计算基础负权重（保持正负样本总贡献平衡）
-            base_neg_weight = float(self.pos_weight) * (count_1_0 / total_negative)
+        if count_positive > 0 and count_negative > 0:
+            # 动态调整负样本权重，保持正负样本对总损失的贡献平衡
+            # neg_weight = pos_weight * (正样本数 / 负样本数)
+            neg_weight = float(self.pos_weight) * (count_positive / count_negative)
             
-            # 按样本数量反比分配权重（样本少=权重高，让每个标签桶的总贡献相同）
-            self.weight_0_6 = torch.tensor(base_neg_weight * (total_negative / max(count_0_6, 1)))
-            self.weight_0_3 = torch.tensor(base_neg_weight * (total_negative / max(count_0_3, 1)))
-            self.weight_0_0 = torch.tensor(base_neg_weight * (total_negative / max(count_0_0, 1)))
-        elif count_1_0 == 0:
-            # 没有正样本，负样本权重统一设为正样本权重
-            self.weight_0_6 = torch.tensor(float(self.pos_weight))
-            self.weight_0_3 = torch.tensor(float(self.pos_weight))
+            # 更新负样本权重（复用weight_0_0变量）
+            self.weight_0_0 = torch.tensor(neg_weight)
+        elif count_positive == 0:
+            # 没有正样本，负样本权重设为正样本权重
             self.weight_0_0 = torch.tensor(float(self.pos_weight))
         else:
             # 没有负样本，权重设为较小值
-            self.weight_0_6 = torch.tensor(0.1)
-            self.weight_0_3 = torch.tensor(0.1)
             self.weight_0_0 = torch.tensor(0.1)
         
     def forward(self, inputs, targets):
         """
         inputs: [batch_size, 1] 模型输出的logits (BF16)
-        targets: [batch_size] 真实标签 (1.0/0.6/0.3/0.0) (BF16)
+        targets: [batch_size] 真实标签 (1.0/0.0) (BF16)
         """
         # 确保输入形状正确
         if inputs.dim() == 1:
@@ -146,23 +137,12 @@ class DynamicWeightedBCE(nn.Module):
         max_val = torch.clamp(inputs, min=0)
         loss = inputs - inputs * targets + max_val + torch.log(torch.exp(-max_val) + torch.exp(-inputs - max_val))
         
-        # 根据标签值分配对应的权重
+        # 二分类动态权重：正样本和负样本分别使用动态权重
         pos_weight = self.pos_weight.to(dtype=inputs.dtype, device=inputs.device)
-        weight_0_6 = self.weight_0_6.to(dtype=inputs.dtype, device=inputs.device)
-        weight_0_3 = self.weight_0_3.to(dtype=inputs.dtype, device=inputs.device)
-        weight_0_0 = self.weight_0_0.to(dtype=inputs.dtype, device=inputs.device)
+        neg_weight = self.weight_0_0.to(dtype=inputs.dtype, device=inputs.device)
         
-        # 按标签桶分配权重
-        weights = torch.where(
-            targets >= 0.9, pos_weight,           # 1.0标签
-            torch.where(
-                targets >= 0.55, weight_0_6,      # 0.6标签
-                torch.where(
-                    targets >= 0.15, weight_0_3,  # 0.3标签
-                    weight_0_0                     # 0.0标签
-                )
-            )
-        )
+        # 根据标签分配权重：正样本用pos_weight，负样本用动态neg_weight
+        weights = torch.where(targets >= 0.5, pos_weight, neg_weight)
         loss = loss * weights
         
         # 🔥 新增：对预测偏差较大的样本进行指数级额外惩罚
@@ -172,16 +152,16 @@ class DynamicWeightedBCE(nn.Module):
         # 计算预测值与真实标签之间的绝对差值
         prediction_error = torch.abs(predictions - targets)
         
-        # 当差值 >= 0.2时，应用指数级惩罚
-        # 使用 2^(差值) 作为额外惩罚因子
-        # 例如：差值0.2 -> 2^0.2 ≈ 1.15 (温和惩罚)
-        #       差值0.5 -> 2^0.5 ≈ 1.41 (中等惩罚)
-        #       差值0.8 -> 2^0.8 ≈ 1.74 (较强惩罚)
-        #       差值1.0 -> 2^1.0 = 2.0 (损失翻倍)
+        # 当差值 >= 0.15时，应用指数级惩罚（阈值从0.2降低到0.15）
+        # 使用 3^(1.5×差值) 作为额外惩罚因子（底数从2提升到3，指数放大1.5倍）
+        # 例如：差值0.2 -> 3^0.3 ≈ 1.39 (温和惩罚)
+        #       差值0.5 -> 3^0.75 ≈ 2.28 (中等惩罚)
+        #       差值0.8 -> 3^1.2 ≈ 3.74 (强惩罚)
+        #       差值1.0 -> 3^1.5 ≈ 5.20 (损失放大5倍！)
         penalty_multiplier = torch.where(
-            prediction_error >= 0.2,
-            torch.pow(2.0, prediction_error),         # 指数级惩罚：2^(差值)
-            torch.ones_like(prediction_error)         # 差值<0.2时，惩罚因子为1（不额外惩罚）
+            prediction_error >= 0.15,
+            torch.pow(3.0, prediction_error * 1.5),   # 指数级惩罚：3^(1.5×差值)
+            torch.ones_like(prediction_error)         # 差值<0.15时，惩罚因子为1（不额外惩罚）
         )
         
         # 应用额外惩罚
@@ -570,15 +550,10 @@ def generate_single_sample_improved(stock_info_list, stock_weights):
 
             cumulative_return = (original_end_price - original_start_price) / original_start_price
 
-            # 训练集软标签：4档分类，权重上只有1.0使用正权重
-            threshold = DataConfig.UPRISE_THRESHOLD
-            if cumulative_return >= threshold:
+            # 训练集二分类：使用配置文件中的阈值
+            if cumulative_return >= DataConfig.UPRISE_THRESHOLD:  # 涨幅≥阈值
                 target = 1.0
-            elif cumulative_return >= threshold * 0.5:
-                target = 0.6
-            elif cumulative_return >= 0.0:
-                target = 0.3
-            else:
+            else:  # 涨幅<阈值
                 target = 0.0
 
             return input_seq, target
@@ -724,11 +699,11 @@ def create_fixed_evaluation_dataset(test_stock_info, seed=DataConfig.RANDOM_SEED
 
             cumulative_return = (original_end_price - original_start_price) / original_start_price
 
-            # 测试集硬标签：1.0=上涨(≥10%), 0.0=不上涨(<10%)
-            if cumulative_return >= DataConfig.UPRISE_THRESHOLD:
-                target = 1.0  # 上涨
-            else:
-                target = 0.0  # 不上涨
+            # 测试集二分类：与训练集保持一致
+            if cumulative_return >= DataConfig.UPRISE_THRESHOLD:  # 涨幅≥阈值
+                target = 1.0
+            else:  # 涨幅<阈值
+                target = 0.0
 
             all_possible_samples.append((input_seq, target, stock_idx, start_idx, cumulative_return))
     
@@ -800,11 +775,11 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
     
     # 新增：置信度区间统计 {区间名称: [预测上涨且正确数, 预测上涨总数, 预测上涨且实际涨幅≥0%数]}
     confidence_stats = {
-        '0.50-0.80': [0, 0, 0],
-        '0.80-0.90': [0, 0, 0],
-        '0.90-0.93': [0, 0, 0],
-        '0.93-0.96': [0, 0, 0],
-        '0.96-1.00': [0, 0, 0]
+        '0.50-0.55': [0, 0, 0],
+        '0.55-0.58': [0, 0, 0],
+        '0.58-0.60': [0, 0, 0],
+        '0.60-0.70': [0, 0, 0],
+        '0.70-1.00': [0, 0, 0]
     }
     
     num_samples = len(eval_inputs)
@@ -850,40 +825,40 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
                         pred_non_negative += 1
                     
                     # 统计不同置信度区间的精确度
-                    if 0.5 <= probability < 0.8:
-                        confidence_stats['0.50-0.80'][1] += 1
+                    if 0.50 <= probability < 0.55:
+                        confidence_stats['0.50-0.55'][1] += 1
                         if target == 1:
-                            confidence_stats['0.50-0.80'][0] += 1
+                            confidence_stats['0.50-0.55'][0] += 1
                         if actual_return >= 0:
-                            confidence_stats['0.50-0.80'][2] += 1
-                    elif 0.8 <= probability < 0.9:
-                        confidence_stats['0.80-0.90'][1] += 1
+                            confidence_stats['0.50-0.55'][2] += 1
+                    elif 0.55 <= probability < 0.58:
+                        confidence_stats['0.55-0.58'][1] += 1
                         if target == 1:
-                            confidence_stats['0.80-0.90'][0] += 1
+                            confidence_stats['0.55-0.58'][0] += 1
                         if actual_return >= 0:
-                            confidence_stats['0.80-0.90'][2] += 1
-                    elif 0.9 <= probability < 0.93:
-                        confidence_stats['0.90-0.93'][1] += 1
+                            confidence_stats['0.55-0.58'][2] += 1
+                    elif 0.58 <= probability < 0.60:
+                        confidence_stats['0.58-0.60'][1] += 1
                         if target == 1:
-                            confidence_stats['0.90-0.93'][0] += 1
+                            confidence_stats['0.58-0.60'][0] += 1
                         if actual_return >= 0:
-                            confidence_stats['0.90-0.93'][2] += 1
-                    elif 0.93 <= probability < 0.96:
-                        confidence_stats['0.93-0.96'][1] += 1
+                            confidence_stats['0.58-0.60'][2] += 1
+                    elif 0.60 <= probability < 0.70:
+                        confidence_stats['0.60-0.70'][1] += 1
                         if target == 1:
-                            confidence_stats['0.93-0.96'][0] += 1
+                            confidence_stats['0.60-0.70'][0] += 1
                         if actual_return >= 0:
-                            confidence_stats['0.93-0.96'][2] += 1
-                    elif 0.96 <= probability <= 1.0:
-                        confidence_stats['0.96-1.00'][1] += 1
+                            confidence_stats['0.60-0.70'][2] += 1
+                    elif 0.70 <= probability <= 1.00:
+                        confidence_stats['0.70-1.00'][1] += 1
                         if target == 1:
-                            confidence_stats['0.96-1.00'][0] += 1
+                            confidence_stats['0.70-1.00'][0] += 1
                         if actual_return >= 0:
-                            confidence_stats['0.96-1.00'][2] += 1
+                            confidence_stats['0.70-1.00'][2] += 1
                 
-                # 应用新的评分规则：只有置信度≥0.9的预测才参与评分
+                # 应用新的评分规则：只有置信度≥0.6的预测才参与评分
                 # 直接使用真实涨跌幅作为得分（模拟实盘收益）
-                if prediction == 1 and probability >= 0.9:  # 只有预测上涨且置信度≥0.9时才计算分数
+                if prediction == 1 and probability >= 0.6:  # 只有预测上涨且置信度≥0.6时才计算分数
                     score_count += 1  # 增加参与评分的数量
                     score += actual_return  # 直接累加真实涨跌幅（正为盈利，负为亏损）
                 
@@ -1108,25 +1083,15 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
         epoch_inputs, epoch_targets = precompute_training_dataset(
             train_stock_info, train_weights, batch_size, batches_per_epoch, epoch_seed)
         
-        # 根据本轮训练数据的标签分布动态更新损失函数权重
-        criterion.update_weights(epoch_targets)
+        # 注意：动态权重更新已移至每个Batch内部，确保每次参数更新时都基于当前Batch的正负样本比例进行平衡
         
-        # 打印本轮权重信息
-        count_1_0 = np.sum(epoch_targets >= 0.9)
-        count_0_6 = np.sum((epoch_targets >= 0.55) & (epoch_targets < 0.9))
-        count_0_3 = np.sum((epoch_targets >= 0.15) & (epoch_targets < 0.55))
-        count_0_0 = np.sum(epoch_targets < 0.15)
+        # 打印本轮标签分布信息（二分类：1.0/0.0）
+        count_positive = np.sum(epoch_targets >= 0.5)  # 正样本（涨幅≥5%）
+        count_negative = np.sum(epoch_targets < 0.5)   # 负样本（涨幅<5%）
         total_count = len(epoch_targets)
         
-        # 获取当前的权重值
-        current_pos_weight = criterion.pos_weight.item()
-        current_weight_0_6 = criterion.weight_0_6.item()
-        current_weight_0_3 = criterion.weight_0_3.item()
-        current_weight_0_0 = criterion.weight_0_0.item()
-        
-        print(f'  标签分布: 1.0={count_1_0}({count_1_0/total_count:.1%}), 0.6={count_0_6}({count_0_6/total_count:.1%}), 0.3={count_0_3}({count_0_3/total_count:.1%}), 0.0={count_0_0}({count_0_0/total_count:.1%})')
-        print(f'  动态权重: 1.0={current_pos_weight:.3f}, 0.6={current_weight_0_6:.3f}, 0.3={current_weight_0_3:.3f}, 0.0={current_weight_0_0:.3f}')
-        print(f'  测试集权重: 统一为1.000 (标准BCE)')
+        print(f'  标签分布: 上涨(≥5%)={count_positive}({count_positive/total_count:.1%}), 不上涨(<5%)={count_negative}({count_negative/total_count:.1%})')
+        print(f'  动态权重: 每Batch独立计算（正样本固定={criterion.pos_weight.item():.1f}，负样本按比例动态调整）')
         
         # 显示预热进度和调度器信息
         if warmup_scheduler.is_warmup_phase():
@@ -1160,6 +1125,9 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
             # 从预计算的数据中取一个batch
             batch_inputs = epoch_inputs_tensor[start_idx:end_idx]
             batch_targets = epoch_targets_tensor[start_idx:end_idx]
+            
+            # 🔑 每个Batch都更新动态权重，确保每次参数更新时正负样本贡献平衡
+            criterion.update_weights(batch_targets)
             
             optimizer.zero_grad()
             output = model(batch_inputs)
@@ -1219,7 +1187,7 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
         
         # 打印置信度区间的精确度统计
         print(f'  置信度区间精确度:')
-        for interval in ['0.50-0.80', '0.80-0.90', '0.90-0.93', '0.93-0.96', '0.96-1.00']:
+        for interval in ['0.50-0.55', '0.55-0.58', '0.58-0.60', '0.60-0.70', '0.70-1.00']:
             correct, total_pred, non_negative = confidence_stats[interval]
             if total_pred > 0:
                 precision = correct / total_pred
@@ -1231,7 +1199,7 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
         overall_acc = sum(class_correct) / sum(class_total) if sum(class_total) > 0 else 0
         avg_loss = total_loss / batches_per_epoch
         
-        # 计算平均得分（只有置信度≥0.9的预测参与评分）
+        # 计算平均得分（只有置信度≥0.6的预测参与评分）
         # 现在score是真实涨跌幅的累加，avg_score就是平均收益率
         avg_score = score / score_count if score_count > 0 else 0
         
@@ -1241,7 +1209,7 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
         composite_score = score  # 直接使用总收益率作为综合得分
         
         print(f'  总体准确率: {overall_acc:.3f}')
-        print(f'  收益评估 (置信度≥0.9): 参与数={score_count}, 累计收益率={score*100:.2f}%, 平均收益率={avg_score*100:.3f}%')
+        print(f'  收益评估 (置信度≥0.6): 参与数={score_count}, 累计收益率={score*100:.2f}%, 平均收益率={avg_score*100:.3f}%')
         print(f'  AUC得分: {auc_score:.4f}')
         print(f'  训练集损失: {avg_loss:.4f}, 测试集损失: {test_loss:.4f}')
         
@@ -1265,7 +1233,7 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
             import copy
             best_model_state = copy.deepcopy(model.state_dict())
             print(f'  ✓ 发现更好的模型！{save_reason}（已缓存到内存）')
-            print(f'    详情: AUC={auc_score:.4f}, 收益评估(置信度≥0.9): 参与数={score_count}, 累计={composite_score*100:.2f}%, 平均={avg_score*100:.3f}%')
+            print(f'    详情: AUC={auc_score:.4f}, 收益评估(置信度≥0.6): 参与数={score_count}, 累计={composite_score*100:.2f}%, 平均={avg_score*100:.3f}%')
         
         print("-" * 50)
     

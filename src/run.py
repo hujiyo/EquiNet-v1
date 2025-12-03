@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     # 打印置信度区间精确度统计
     print(f'置信度区间精确度:')
-    for interval in ['0.50-0.80', '0.80-0.90', '0.90-0.93', '0.93-0.96', '0.96-1.00']:
+    for interval in ['0.50-0.55', '0.55-0.58', '0.58-0.60', '0.60-0.70', '0.70-1.00']:
         correct, total_pred, non_negative = confidence_stats[interval]
         if total_pred > 0:
             precision = correct / total_pred
