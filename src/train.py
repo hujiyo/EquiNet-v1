@@ -2,11 +2,9 @@
 训练脚本
 
 评分制度（收益率制度，以代码实现为准）：
-采用实际涨跌幅作为评分依据，更贴近真实交易场景。
-只有预测上涨且置信度≥0.9的预测才参与评分：
-- 直接累加股票的实际涨跌幅（正为盈利，负为亏损）
-- 累计收益率越高，模型表现越好
-- 参与评分的最低数量要求为20个预测
+采用排序能力评估，更贴近真实选股场景。
+按预测概率从高到低排序，统计Top-K%样本的收益：
+每个区间统计：样本数、平均收益、累计收益、上涨准确率、非负率
 '''
 
 import os,torch,torch.nn as nn,torch.optim as optim,pandas as pd,numpy as np
@@ -174,6 +172,23 @@ class DynamicWeightedBCE(nn.Module):
         else:
             return loss
 
+class RMSNorm(nn.Module):
+    """
+    RMSNorm: 只做缩放，不减均值
+    相比LayerNorm，保留了特征间的相对大小关系
+    这对于OHLC价格特征很重要，因为 High > Close > Open > Low 的关系需要保持
+    """
+    def __init__(self, dim, eps=1e-6):
+        super(RMSNorm, self).__init__()
+        self.scale = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+    
+    def forward(self, x):
+        # 计算RMS (Root Mean Square)
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        # 只做缩放，不减均值
+        return x / rms * self.scale
+
 class PositionalEncoding(nn.Module):
     """
     标准的正弦位置编码
@@ -213,8 +228,8 @@ class MultiHeadAttention(nn.Module):
         # 使用标准的MultiheadAttention
         self.attention = nn.MultiheadAttention(d_model, nhead, batch_first=True)
         
-        # Pre-Norm: 在注意力之前进行归一化
-        self.norm = nn.LayerNorm(d_model)
+        # Pre-Norm: 在注意力之前进行归一化（使用RMSNorm保留特征相对关系）
+        self.norm = RMSNorm(d_model)
         self.dropout = nn.Dropout(ModelConfig.ATTENTION_DROPOUT)
         
     def forward(self, x, attn_mask=None):
@@ -258,8 +273,8 @@ class TransformerLayer(nn.Module):
                 nn.Linear(d_model * 4, d_model),  # 再压缩回原维度
             )
             
-            # Pre-Norm: 在前馈网络之前进行归一化
-            self.norm = nn.LayerNorm(d_model)
+            # Pre-Norm: 在前馈网络之前进行归一化（使用RMSNorm保留特征相对关系）
+            self.norm = RMSNorm(d_model)
             self.dropout = nn.Dropout(ModelConfig.DROPOUT_RATE)
         
     def forward(self, x):
@@ -317,9 +332,9 @@ class EnhancedStockTransformer(nn.Module):
             for i in range(num_layers)
         ])
         
-        # Pre-Norm架构：在最后添加一个LayerNorm
+        # Pre-Norm架构：在最后添加一个RMSNorm
         # 因为Pre-Norm的最后一层没有归一化输出
-        self.final_norm = nn.LayerNorm(d_model)
+        self.final_norm = RMSNorm(d_model)
         
         # 简化输出层，减少过拟合
         self.output_projection = nn.Sequential(
@@ -755,11 +770,11 @@ def create_fixed_evaluation_dataset(test_stock_info, seed=DataConfig.RANDOM_SEED
 def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_returns, device, batch_size=DataConfig.EVAL_BATCH_SIZE):
     """
     使用批处理进行快速评估（二分类）
-    返回: (score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, score_count)
+    返回: (total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, top_percent_stats)
+    
+    top_percent_stats: 按预测概率排序后，前1%/5%/10%样本的收益统计
     """
     model.eval()
-    score = 0
-    score_count = 0  # 新增：参与评分的预测数量
     total = 0
     class_correct = [0, 0]  # [不上涨正确数, 上涨正确数]
     class_total = [0, 0]    # [不上涨总数, 上涨总数]
@@ -769,9 +784,10 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
     pred_positive_total = 0    # 预测上涨的总数量
     pred_non_negative = 0       # 预测上涨且实际涨幅≥0%的数量
     
-    # 新增：用于AUC计算的列表
+    # 新增：用于AUC计算和Top-K排序的列表
     all_probabilities = []
     all_targets = []
+    all_returns = []  # 存储所有样本的实际收益率
     
     # 新增：置信度区间统计 {区间名称: [预测上涨且正确数, 预测上涨总数, 预测上涨且实际涨幅≥0%数]}
     confidence_stats = {
@@ -802,9 +818,10 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
             batch_probabilities = torch.sigmoid(batch_outputs).float().cpu().numpy().flatten()
             batch_predictions = (batch_probabilities > 0.5).astype(int)  # 概率>0.5预测为上涨
             
-            # 收集所有概率和标签用于AUC计算
+            # 收集所有概率、标签和收益率用于后续计算
             all_probabilities.extend(batch_probabilities)
             all_targets.extend(batch_targets)
+            all_returns.extend(batch_returns)
             
             # 批量计算得分
             for j in range(len(batch_targets)):
@@ -856,13 +873,7 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
                         if actual_return >= 0:
                             confidence_stats['0.70-1.00'][2] += 1
                 
-                # 应用新的评分规则：只有置信度≥0.6的预测才参与评分
-                # 直接使用真实涨跌幅作为得分（模拟实盘收益）
-                if prediction == 1 and probability >= 0.6:  # 只有预测上涨且置信度≥0.6时才计算分数
-                    score_count += 1  # 增加参与评分的数量
-                    score += actual_return  # 直接累加真实涨跌幅（正为盈利，负为亏损）
-                
-                # 统计预测正确性（用于显示准确率，不影响评分）
+                # 统计预测正确性（用于显示准确率）
                 if prediction == target:
                     class_correct[target] += 1
     
@@ -873,7 +884,31 @@ def evaluate_model_batch(model, eval_inputs, eval_targets, eval_cumulative_retur
         # 如果所有标签都是同一类，AUC无法计算
         auc_score = 0.5  # 随机分类器的AUC
     
-    return score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, score_count
+    # 🔑 核心改进：按预测概率排序，计算Top N%样本的收益统计
+    # 这能真实反映模型的排序能力（选股能力）
+    all_probabilities = np.array(all_probabilities)
+    all_targets = np.array(all_targets)
+    all_returns = np.array(all_returns)
+    
+    # 按预测概率从高到低排序
+    sorted_indices = np.argsort(all_probabilities)[::-1]  # 降序排列
+    
+    # 计算Top N%的统计（使用配置文件中的百分比）
+    percent = DataConfig.TOP_PERCENT
+    top_k = max(1, int(len(sorted_indices) * percent / 100))  # 至少1个样本
+    top_indices = sorted_indices[:top_k]
+    
+    top_returns = all_returns[top_indices]
+    top_targets = all_targets[top_indices]
+    
+    # 统计：样本数、累计收益、平均收益
+    top_stats = {
+        'count': top_k,
+        'total_return': np.sum(top_returns),
+        'avg_return': np.mean(top_returns),
+    }
+    
+    return total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, top_stats
 
 def calculate_test_loss(model, eval_inputs, eval_targets, criterion, device, batch_size=DataConfig.EVAL_BATCH_SIZE):
     """
@@ -1158,7 +1193,7 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
             main_scheduler.step()  # 更新主调度器（余弦退火或阶梯衰减）
         
         # 固定评估集评估
-        score, total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, score_count = evaluate_model_batch(
+        total, class_correct, class_total, pred_positive_correct, pred_positive_total, pred_non_negative, auc_score, confidence_stats, top_stats = evaluate_model_batch(
             model, eval_inputs, eval_targets, eval_cumulative_returns, device, batch_size=DataConfig.EVAL_BATCH_SIZE
         )
         
@@ -1199,17 +1234,8 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
         overall_acc = sum(class_correct) / sum(class_total) if sum(class_total) > 0 else 0
         avg_loss = total_loss / batches_per_epoch
         
-        # 计算平均得分（只有置信度≥0.6的预测参与评分）
-        # 现在score是真实涨跌幅的累加，avg_score就是平均收益率
-        avg_score = score / score_count if score_count > 0 else 0
-        
-        # 计算综合得分：总收益率（更直观）
-        # total_return = avg_score * score_count 就是总的累计收益率
-        import math
-        composite_score = score  # 直接使用总收益率作为综合得分
-        
         print(f'  总体准确率: {overall_acc:.3f}')
-        print(f'  收益评估 (置信度≥0.6): 参与数={score_count}, 累计收益率={score*100:.2f}%, 平均收益率={avg_score*100:.3f}%')
+        print(f'  Top{DataConfig.TOP_PERCENT}%收益: 样本数={top_stats["count"]}, 平均={top_stats["avg_return"]*100:+.2f}%, 累计={top_stats["total_return"]*100:+.2f}%')
         print(f'  AUC得分: {auc_score:.4f}')
         print(f'  训练集损失: {avg_loss:.4f}, 测试集损失: {test_loss:.4f}')
         
@@ -1233,7 +1259,7 @@ def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=
             import copy
             best_model_state = copy.deepcopy(model.state_dict())
             print(f'  ✓ 发现更好的模型！{save_reason}（已缓存到内存）')
-            print(f'    详情: AUC={auc_score:.4f}, 收益评估(置信度≥0.6): 参与数={score_count}, 累计={composite_score*100:.2f}%, 平均={avg_score*100:.3f}%')
+            print(f'    详情: AUC={auc_score:.4f}, Top{DataConfig.TOP_PERCENT}%收益: 平均={top_stats["avg_return"]*100:+.2f}%, 累计={top_stats["total_return"]*100:+.2f}%')
         
         print("-" * 50)
     

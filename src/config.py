@@ -25,12 +25,11 @@ class DataConfig:
     UPRISE_THRESHOLD = 0.08          # 上涨阈值（8%，涨幅≥8%视为上涨）
 
     # 评估参数
-    EVAL_SAMPLES = 2000               # 评估样本数量
     EVAL_BATCH_SIZE = 100             # 评估批处理大小
+    TOP_PERCENT = 1                   # 排序收益评估的百分比（取预测概率前N%的样本）
     
     # 模型保存条件
-    MIN_SCORE_COUNT = 20              # 最低参与预测数要求
-    MIN_AUC = 0.55                    # 最低AUC要求（按时间划分后的真实性能基线）
+    MIN_AUC = 0.65                    # 最低AUC要求（按时间划分后的真实性能基线）
 
 # ==================== 模型架构参数 ====================
 class ModelConfig:
@@ -39,10 +38,10 @@ class ModelConfig:
     INPUT_DIM = 5                    # 输入特征维度数（OHLCV）
     PRICE_DIM = 4                    # 价格特征维度（OHLC）
     VOLUME_DIM = 1                   # 成交量特征维度
-    D_MODEL = 84                     # 模型维度（价格48维 + 成交量16维）
-    PRICE_EMBED_DIM = 63             # 价格Embedding维度（75%）
-    VOLUME_EMBED_DIM = 21            # 成交量Embedding维度（25%）
-    NHEAD = 4                        # 注意力头数（从4降到3，匹配更小的模型）
+    D_MODEL = 80                     # 模型维度（价格48维 + 成交量16维）
+    PRICE_EMBED_DIM = 64             # 价格Embedding维度（75%）
+    VOLUME_EMBED_DIM = 16            # 成交量Embedding维度（25%）
+    NHEAD = 4                        # 注意力头数
     NUM_LAYERS = 6                   # Transformer层数
     OUTPUT_DIM = 1                   # 输出维度（上涨概率，0-1之间）
     MAX_SEQ_LEN = DataConfig.CONTEXT_LENGTH  # 最大序列长度（直接引用CONTEXT_LENGTH，确保一致性）
@@ -60,8 +59,8 @@ class TrainingConfig:
     LEARNING_RATE = 0.001            # 初始学习率（提高学习率）
 
     # 训练批处理
-    BATCH_SIZE = 4096                 # GPU每次并行训练的样本数（增加批大小）
-    BATCHES_PER_EPOCH = 20           # 每轮训练的批次数（减少批次数）
+    BATCH_SIZE = 2048                 # GPU每次并行训练的样本数（增加批大小）
+    BATCHES_PER_EPOCH = 40           # 每轮训练的批次数（减少批次数）
 
     # 优化器参数
     WEIGHT_DECAY = 1e-5              # 权重衰减
@@ -165,11 +164,9 @@ def print_config_summary():
     print(f"  涨幅<{DataConfig.UPRISE_THRESHOLD*100:.0f}% → 标签0.0 (不上涨)")
 
     print(f"\n评估参数:")
-    print(f"  评估样本数: {DataConfig.EVAL_SAMPLES}")
     print(f"  评估批处理大小: {DataConfig.EVAL_BATCH_SIZE}")
     
     print(f"\n模型保存条件:")
-    print(f"  最低参与预测数: {DataConfig.MIN_SCORE_COUNT}")
     print(f"  最低AUC要求: {DataConfig.MIN_AUC}")
 
     print("=" * 50)
