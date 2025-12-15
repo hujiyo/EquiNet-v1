@@ -565,10 +565,15 @@ def generate_single_sample_improved(stock_info_list, stock_weights):
 
             cumulative_return = (original_end_price - original_start_price) / original_start_price
 
-            # 训练集二分类：使用配置文件中的阈值
+            # 软标签机制：降低边界区域的惩罚
+            # - 收益 ≥ 8% → 1.0（明确上涨）
+            # - 收益 0-8% → 0.4（边界区域，降低矛盾惩罚）
+            # - 收益 < 0% → 0.0（明确不涨）
             if cumulative_return >= DataConfig.UPRISE_THRESHOLD:  # 涨幅≥阈值
                 target = 1.0
-            else:  # 涨幅<阈值
+            elif cumulative_return >= 0:  # 0-8%之间
+                target = 0.4
+            else:  # 涨幅<0%
                 target = 0.0
 
             return input_seq, target
