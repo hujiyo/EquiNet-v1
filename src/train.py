@@ -580,6 +580,71 @@ def generate_single_sample_improved(stock_info_list, stock_weights):
     
     raise ValueError("无法生成有效样本：股票数据长度不足或收盘价为0")
 
+def generate_single_sample_improved_with_return(stock_info_list, stock_weights):
+    """
+    与 generate_single_sample_improved 相同的采样逻辑，但额外返回逐样本真实收益率 cumulative_return。
+    返回: (input_seq, target, cumulative_return)
+    """
+    for _ in range(100):
+        stock_index = np.random.choice(len(stock_info_list), p=stock_weights)
+        stock_info = stock_info_list[stock_index]
+        stock_data = stock_info['data']
+
+        context_length = DataConfig.CONTEXT_LENGTH
+        required_length = DataConfig.REQUIRED_LENGTH
+
+        if len(stock_data) < required_length:
+            continue
+
+        max_start_index = len(stock_data) - required_length
+        if max_start_index < 1:
+            continue
+        start_index = np.random.randint(1, max_start_index + 1)
+
+        input_seq_raw = stock_data[start_index:start_index + context_length]
+
+        input_seq = np.zeros_like(input_seq_raw, dtype=np.float64)
+
+        prev_day_data = stock_data[start_index - 1]
+        prev_prices = prev_day_data[:4]
+        prev_volume = prev_day_data[4]
+
+        if np.any(prev_prices == 0) or prev_volume == 0:
+            continue
+
+        prev_close = prev_prices[3]
+        if prev_close == 0:
+            continue
+        input_seq[0, :4] = (input_seq_raw[0, :4] - prev_close) / prev_close
+        input_seq[0, 4] = (input_seq_raw[0, 4] - prev_volume) / prev_volume
+
+        for i in range(1, context_length):
+            yesterday_close = input_seq_raw[i-1, 3]
+            yesterday_volume = input_seq_raw[i-1, 4]
+            if yesterday_close == 0 or yesterday_volume == 0:
+                break
+            input_seq[i, :4] = (input_seq_raw[i, :4] - yesterday_close) / yesterday_close
+            input_seq[i, 4] = (input_seq_raw[i, 4] - yesterday_volume) / yesterday_volume
+        else:
+            original_start_price = stock_data[start_index + context_length - 1, 3]
+            original_end_price = stock_data[start_index + DataConfig.REQUIRED_LENGTH - 1, 3]
+
+            if original_start_price == 0:
+                continue
+
+            cumulative_return = (original_end_price - original_start_price) / original_start_price
+
+            if cumulative_return >= DataConfig.UPRISE_THRESHOLD:
+                target = 1.0
+            elif cumulative_return >= 0:
+                target = 0.4
+            else:
+                target = 0.0
+
+            return input_seq, target, cumulative_return
+
+    raise ValueError("无法生成有效样本：股票数据长度不足或收盘价为0")
+
 def generate_batch_samples_improved(stock_info_list, stock_weights, batch_size):
     """
     改进的批量生成训练样本（使用滚动窗口标准化）
@@ -606,6 +671,35 @@ def generate_batch_samples_improved(stock_info_list, stock_weights, batch_size):
         raise ValueError(f"无法生成足够的样本，只生成了 {len(batch_inputs)}/{batch_size} 个")
     
     return np.array(batch_inputs), np.array(batch_targets)
+
+def generate_batch_samples_improved_with_returns(stock_info_list, stock_weights, batch_size):
+    """
+    改进的批量生成训练样本（使用滚动窗口标准化），并额外返回逐样本收益率。
+    返回: (batch_inputs, batch_targets, batch_returns)
+    """
+    batch_inputs = []
+    batch_targets = []
+    batch_returns = []
+
+    attempts = 0
+    max_attempts = batch_size * 10
+
+    while len(batch_inputs) < batch_size and attempts < max_attempts:
+        attempts += 1
+        try:
+            input_seq, target, cumulative_return = generate_single_sample_improved_with_return(
+                stock_info_list, stock_weights
+            )
+            batch_inputs.append(input_seq)
+            batch_targets.append(target)
+            batch_returns.append(cumulative_return)
+        except ValueError:
+            continue
+
+    if len(batch_inputs) < batch_size:
+        raise ValueError(f"无法生成足够的样本，只生成了 {len(batch_inputs)}/{batch_size} 个")
+
+    return np.array(batch_inputs), np.array(batch_targets), np.array(batch_returns)
 
 # 创建固定的评估数据集（使用滚动窗口标准化，只使用测试集时间范围）
 def create_fixed_evaluation_dataset(test_stock_info, seed=DataConfig.RANDOM_SEED):
@@ -1018,6 +1112,21 @@ def precompute_training_dataset(train_stock_info, train_weights,
         train_stock_info, train_weights, samples_per_epoch)
     
     return np.array(epoch_inputs), np.array(epoch_targets)
+
+
+def precompute_training_dataset_with_returns(train_stock_info, train_weights,
+                                            batch_size, batches_per_epoch, seed=None):
+    samples_per_epoch = batch_size * batches_per_epoch
+
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+
+    epoch_inputs, epoch_targets, epoch_returns = generate_batch_samples_improved_with_returns(
+        train_stock_info, train_weights, samples_per_epoch
+    )
+
+    return np.array(epoch_inputs), np.array(epoch_targets), np.array(epoch_returns)
 
 # 改进的训练函数
 def train_model(model, train_stock_info, test_stock_info, train_weights, epochs=TrainingConfig.EPOCHS, 
